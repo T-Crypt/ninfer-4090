@@ -57,7 +57,7 @@ int bf16_a16_conformance() {
         4, 8, 16, 32, 48, 127, 128, 129, 1024, 1536,
     };
     return ninfer::test::linear_add::run_shape(
-               "BF16_A16 LinearAdd", WeightFormat::BF16,
+               "BF16_A16 LinearAdd", WeightFormat::BF16, ninfer::test::linear_add::ActivationCompute::A16,
                ShapeCase{5120, 6144, 431U, kRouteStarts, kRouteInteriors}) +
            bf16_a16_rejections();
 }
