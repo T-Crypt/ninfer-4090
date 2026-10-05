@@ -100,7 +100,7 @@ commit, then the inventory, commit by commit.
 You are working in `~/ninfer-v3` (a worktree of `~/ninfer-4090`). Do not touch `~/ninfer-4090` itself: its detached
 HEAD is the production build, and llama-swap runs `ninfer-serve` from it.
 
-1. `git switch -c port/v3-forward d44ab584` in a **new** worktree (`git worktree add ~/ninfer-v3-forward d44ab584
+1. `git switch -c port/v3-forward d44ab584` in a **new** worktree (`git worktree add ~/wt/ninfer-KKCF9MR d44ab584
    -b port/v3-forward`), so this branch and the docs branch stay separate.
 2. Configure and build Release for `CMAKE_CUDA_ARCHITECTURES=89` with apps, tests and benchmarks, `-j 4`. Never
    higher: a `-j16` CUDA build beside a resident model froze this machine on 2026-10-03.
