@@ -56,3 +56,61 @@ the old layout, and we have to move them into `src/models/qwen3_5/`.
 
 v3 Qwen3.8-27B artifact loads and serves on the 4090 at 262K with MTP and vision, the INT8 and tolerant-tool-call
 changes are carried, and the bench shows no regression against `deploy/ninfer-serve-46645ada` (v2).
+
+## 2026-10-05: upstream moved, and the plan flips direction
+
+**What changed upstream since 2026-10-03.** Six commits landed on `upstream/master` (head `68c54356`). The big one is
+`b9114396` "replace context cache and add preemptive scheduling": 176 files, +21.4K / -32.6K, almost all of it in
+`src/models/qwen3_5` and `src/runtime/engine`. That is the tree stage 2 planned to move our runtime into, so the
+target moved under the plan. The other five add Prometheus metrics (`abb7f14f`), TTFT benches (`f854788b`), prep
+overhead cuts (`a8e212ac`), doc/bench alignment (`c772812b`) and a template-trimming cache fix (`68c54356`).
+Upstream now leads us by 94 commits.
+
+**Why the direction flips.** The three v3 commits alone touch 884 files (`168fdd81` 289, `4cde7ad0` 362, `04350ba9`
+233). Our whole 4090 delta since the merge-base is 208 files, +14.9K / -1.1K, and 90 commits once docs and merges
+are set aside (`docs/v3-port-inventory.md`). Porting v3 back into the old layout means rewriting the larger side.
+So we branch from upstream and carry our delta forward instead: new branch `port/v3-forward` from an upstream
+commit, then the inventory, commit by commit.
+
+**Two targets, in order.**
+
+- **Target A: `d44ab584`** (2026-09-29), the last upstream commit before the cache rewrite. It has the v3 converter,
+  loader, engine and jinja templates, and the old context cache our serving fixes were written against. Carry the
+  inventory here first and get v3 serving on the 4090.
+- **Target B: `68c54356`** (current head). Rebase A onto it. The cache rewrite replaces the planners that upstream
+  issue #9 lives in (`fix/issue9-entitlement` on `4090-base` patches the old planner), so retest #9 here and drop
+  `--auto-long-anchors 0` if the latch is gone. Expect our slot-spill and prefix-reuse changes to need a rewrite at
+  this step, not a replay.
+
+**Revised stages** (each builds and passes before the next):
+
+1. `port/v3-forward` from `d44ab584`. Build for `sm_89` with no fork commits. Expect it to compile and refuse to
+   start or run slowly: upstream targets `sm_120a` (native NVFP4, dflash). Record what breaks; that list is the
+   real scope of the Ada work.
+2. Carry the Ada kernel and target commits from the inventory (`src/ops`, `src/targets`, `src/core`) into the v3
+   layout. Gate: the op tests in `tests/ops` pass on sm_89.
+3. Produce a v3 Qwen3.8-27B artifact with upstream's converter, or pull an official v3 one, and serve it at 262K
+   with `rk4v4-e8`, MTP3 and vision. Gate: greedy fixed-prompt tokens match the v2 deploy build (`46645ada`).
+4. Carry serve-side commits (`src/serve`, tolerant tool calls from upstream PR #14, INT8 prefill from #15).
+5. Target B rebase and the issue #9 retest.
+6. Bench against `deploy/ninfer-serve-46645ada` before any deploy switch: prefill/decode t/s, 262K, tool-call stress.
+
+## Stage 1 brief (for a local agent)
+
+You are working in `~/ninfer-v3` (a worktree of `~/ninfer-4090`). Do not touch `~/ninfer-4090` itself: its detached
+HEAD is the production build, and llama-swap runs `ninfer-serve` from it.
+
+1. `git switch -c port/v3-forward d44ab584` in a **new** worktree (`git worktree add ~/ninfer-v3-forward d44ab584
+   -b port/v3-forward`), so this branch and the docs branch stay separate.
+2. Configure and build Release for `CMAKE_CUDA_ARCHITECTURES=89` with apps, tests and benchmarks, `-j 4`. Never
+   higher: a `-j16` CUDA build beside a resident model froze this machine on 2026-10-03.
+3. Record every configure error, compile error and `#error`/arch guard in a new section of this doc, with file and
+   line. Do not fix anything yet.
+4. Then, for each inventory row that touches `src/ops` or `src/targets`, find the v3 path that replaced its file
+   (`git log --follow` or a grep for the kernel name on `d44ab584`) and write it in the row's status as
+   `maps to <path>` or `no v3 home`.
+5. Stop there. Commit the doc changes on `port/v3-catchup` with a `docs(v3-port):` subject. Do not push, do not
+   run the model, do not stop or restart llama-swap.
+
+Done when: the build log summary and the `maps to` column are filled in, and nothing outside the two worktrees
+changed.
