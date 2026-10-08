@@ -114,3 +114,71 @@ HEAD is the production build, and llama-swap runs `ninfer-serve` from it.
 
 Done when: the build log summary and the `maps to` column are filled in, and nothing outside the two worktrees
 changed.
+
+## Stage 1 results (2026-10-08, aphotic)
+
+Worktree `~/wt/ninfer-KKCF9MR` on `port/v3-forward` (branched from `d44ab584`). Release, `CMAKE_CUDA_ARCHITECTURES=89`,
+apps + tests + benchmarks, `-j 4` (configure pass plus two build passes, the second with ninja `-k 0` to enumerate every
+failure). Logs: `/tmp/opencode/kkcf9mr-{configure-89,configure-89b,build-89,build-89k}.log`. Break 1 blocks configure
+outright, so the survey ran with the arch guard bypassed locally — a 4-line uncommitted edit (FATAL_ERROR → WARNING),
+restored right after the run. Nothing committed on `port/v3-forward`; no push; no model run.
+
+### Break 1 — configure rejects sm_89 outright
+
+`CMakeLists.txt:9-12`: `message(FATAL_ERROR "NInfer supports only CMAKE_CUDA_ARCHITECTURES=120a; got '89'")`. Configure
+exits 1 before CUDA compiler detection. Stage 2's first decision is how to relax this (option flag vs per-target arch
+properties).
+
+### Break 2 — 53 files in `src/ops` fail ptxas for sm_89 (the real Ada scope)
+
+The C++/host side is **clean**: zero compile errors; the non-CUDA libraries build and link (artifact, media_decode,
+product *, runtime_support, text, jinja, spdlog). All breakage is at PTX assembly: **53 source files, 200,146 ptxas
+error lines, all on `.target sm_89`** (172,026 name sm_89 explicitly; the rest are "requires .target sm_90 or higher").
+
+Feature census (per error-line counts):
+
+| Feature | Lines | Note |
+|---|---|---|
+| `mma with block scale` | 33,664 | fp8 `.kind::mxf8f6f4` + `.scale_vec::1X` (29,568); nvfp4 `.kind::mxf4nvf4` + `.scale_vec::4X` (4,096) |
+| `cvt.bf16x2.e4m3x2` / `cvt.bf16x2.e2m1x2` | 21,692 / 13,656 | Blackwell pair-widening converts |
+| TMA: `cp.async.bulk.tensor` + `.tile` + `.mbarrier::complete_tx::bytes` | 5,112 each | sm_90+ |
+| `mul.bf16x2` (as emitted here) | 6,828 | reported "requires .target sm_90 or higher" |
+| `cvt.e2m1x2.f32` | 1,992 | |
+| `.cluster scope` + `.op_restrict` | 166 each | sm_90+ |
+| `griddepcontrol` | 159 | sm_90+ |
+| `setmaxnreg.inc` / `.dec` | 15 each | sm_90+ |
+
+The 53 = 47 files in the `ninfer_ops` target + 6 in `ninfer_nvfp4_non_rdc`. By area: linear + shape-specialized 17,
+attn_input_proj 7, linear_add 6, gdn_input_proj 6, linear_swiglu 5, dense causal-cache (fp8/k8v4/nvfp4) 6,
+kv_cache/append 2, linear_topk 2, sparse_moe 2. Full list: appendix at the bottom of `docs/v3-port-inventory.md`.
+
+Implications for stage 2:
+
+1. Every fp8/nvfp4 A4/A8/A16 route needs an sm_89 fallback or gating (fork precedent: `25c782aa` gated NVFP4 A4 tests
+   behind `NINFER_SM86`); the TMA kernels need Ada schedules or exclusion from the sm_89 build.
+2. **The fork's own Ada kernels are not in the failure list.** `gqa_attention_*`, `e8_root_codec` / `e8_lattice`,
+   `q4_q5_attn_input_int8.cu`, the rk4v4/e8 ops — none fail. Written for sm_89, they compile against the v3 tree
+   as-is. The failing surface is upstream's Blackwell-first fp8/nvfp4/k8v4/TMA routes plus `sparse_moe`.
+
+### Structure finding — `src/targets/` is gone on d44ab584
+
+Upstream replaced the fork's `src/targets/` (`qwen3_6`, `qwen3_6_27b`, `qwen3_6_35b_a3b`, `registry.*`) with
+`src/models/` (`registry.{cpp,h}`, `load_options.h`) and `src/models/qwen3_5/{load,execution,frontend,program,state}`.
+Every fork commit touching `src/targets/**` is a rewrite into `src/models/qwen3_5/**`, not a replay — inventory
+statuses mark these `targets/** → src/models/qwen3_5 (rewrite)`. `src/ops` and `src/core` keep their layout. Across
+the 44 inventory rows that touch ops/targets/core (192 files): 39 same-path, 49 fork-added carries at the same path,
+19 moved (mostly into `src/core/{device,host_worker_pool,host_kv_arena}.cpp`, `src/ops/kernel/sampling.cuh`,
+`src/ops/gdn_input_proj/q8/q8_gdn_input_gemm_splitk.cu`, `src/ops/candidate_selector/bf16/candidate_selector_path.cu`),
+78 in the targets rewrite bucket, 6 with no v3 home (`ops/linear/w8/w8_config.h`,
+`ops/linear_swiglu/w8/w8_linear_swiglu_gemm_mma.cu`, `ops/softmax_attention/dense/causal_cache/small_t.cu`, plus 3
+targets-tree files). The symbol-grep mapping is provisional; verify per file during the stage-2 replay.
+
+### Also noted
+
+- Upstream moved again during stage 1: head is now `81c8ce09` (fetched 2026-10-08), +33 commits past the `68c54356`
+  Target B named above; lead over the fork is 127. Pin Target B to whatever upstream head is live when stage 4
+  completes rather than chasing.
+- Inventory header corrected: 155 = 90 non-docs/non-merge + 53 docs-only + **12 merges** (2 upstream, 10 internal);
+  the old "2 are upstream merges" made 90+53+2=145.
+- Untouched by design: the 46 inventory rows that only touch `src/serve`/`src/runtime`/apps (stage-4 mapping scope),
+  the `~/ninfer-4090` production checkout, llama-swap. Nothing pushed.
