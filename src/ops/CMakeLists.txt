@@ -10,13 +10,14 @@ target_link_libraries(ninfer_ops PUBLIC ninfer_core)
 option(NINFER_ENABLE_NVFP4_FAMILY "Build NVFP4-family routes (Blackwell-only)" OFF)
 if(NINFER_ENABLE_NVFP4_FAMILY)
   target_link_libraries(ninfer_ops PRIVATE ninfer_nvfp4_non_rdc)
-  target_compile_definitions(ninfer_ops PRIVATE NINFER_ENABLE_NVFP4_FAMILY=1)
+  target_compile_definitions(ninfer_ops PUBLIC NINFER_ENABLE_NVFP4_FAMILY=1)
 else()
   # Host dispatch still references the excluded symbols; the stub TU turns every
   # NVFP4-family route into a runtime error on Ada.
   target_sources(ninfer_ops PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/nvfp4_family_disabled.cpp"
   )
+  target_compile_definitions(ninfer_ops PUBLIC NINFER_ENABLE_NVFP4_FAMILY=0)
 endif()
 
 # Warp-specialized SM120 NVFP4 kernels use setmaxnreg to transfer registers from

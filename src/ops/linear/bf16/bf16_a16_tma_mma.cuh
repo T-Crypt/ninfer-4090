@@ -42,8 +42,11 @@ __device__ __forceinline__ void bf16_cp_stage_rows(const __nv_bfloat16* weight,
     constexpr int P  = Schedule::kProducerThreads;
     constexpr int rows_per = (BR + BT + P - 1) / P;
     const int first  = pid * rows_per, last = min(first + rows_per, BR + BT);
-    auto copy_row = [&](int row, int global_row, const __nv_bfloat16* base, __nv_bfloat16* stage_base) {
-        const bool zfill = global_row >= token_end;
+    auto copy_row = [&](int row, int global_row, const __nv_bfloat16* base,
+                        __nv_bfloat16* stage_base, bool zfill_oob) {
+        // Only the activation (token) rows can be out of range; A rows are complete
+        // (rows % kBlockRows == 0 is validated), so they never zfill.
+        const bool zfill = zfill_oob && global_row >= token_end;
 #pragma unroll
         for (int chunk = 0; chunk < BK / 8; ++chunk) {
             // 16-byte chunks land on the TMA 128B-swizzle positions the consumers read.
@@ -59,9 +62,9 @@ __device__ __forceinline__ void bf16_cp_stage_rows(const __nv_bfloat16* weight,
         }
     };
     for (int r = first; r < min(last, BR); ++r)
-        copy_row(r, row_begin + r, weight, a + stage * BR * BK);
+        copy_row(r, row_begin + r, weight, a + stage * BR * BK, false);
     for (int r = max(first, BR); r < last; ++r)
-        copy_row(r - BR, token_begin + r - BR, x, b + stage * BT * BK);
+        copy_row(r - BR, token_begin + r - BR, x, b + stage * BT * BK, true);
 }
 
 template <class Schedule, class Epilogue>

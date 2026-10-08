@@ -20,13 +20,17 @@ ninfer_add_op_test(ninfer_linear_q8_a16_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_q8_a16.cpp"
   LIBRARIES ninfer_linear_test_support)
 
+if(NINFER_ENABLE_NVFP4_FAMILY)
 ninfer_add_op_test(ninfer_linear_nvfp4_a16_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_nvfp4_a16.cpp"
   LIBRARIES ninfer_linear_test_support)
+endif()
 
+if(NINFER_ENABLE_NVFP4_FAMILY)
 ninfer_add_op_test(ninfer_linear_nvfp4_a4_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_nvfp4_a4.cpp"
   LIBRARIES ninfer_linear_test_support)
+endif()
 
 ninfer_add_op_test(ninfer_linear_fp8_a16_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_fp8_a16.cpp"

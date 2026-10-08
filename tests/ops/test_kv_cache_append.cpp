@@ -1374,6 +1374,12 @@ int main(int argc, char** argv) {
         std::cerr << "usage: ninfer_kv_cache_append_test [--nvfp4-only|--k8v4-only]\n";
         return 2;
     }
+    if ((nvfp4_only || k8v4_only) && !NINFER_ENABLE_NVFP4_FAMILY) {
+        std::cout << "kv_cache_append: SKIP "
+                  << (nvfp4_only ? "--nvfp4-only" : "--k8v4-only")
+                  << ": NVFP4 family not built (sm_89 port)\n";
+        return 77;
+    }
 
     int failures = 0;
     if (nvfp4_only || k8v4_only) {
@@ -1390,17 +1396,25 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    if (!NINFER_ENABLE_NVFP4_FAMILY) {
+        std::cout << "kv_cache_append: SKIPPED nvfp4-g16 and k8v4 full-cache cases: "
+                     "NVFP4 family not built (sm_89 port)\n";
+    }
     for (const int kv_heads : {4, 2}) {
         failures += full_append_case(kv_heads, KvCacheStorage::BFloat16);
         failures += full_append_case(kv_heads, KvCacheStorage::Int8Group64);
         failures += full_append_case(kv_heads, KvCacheStorage::Fp8E4M3Row256);
-        failures += full_append_case(kv_heads, KvCacheStorage::Nvfp4Group16);
-        failures += full_append_case(kv_heads, KvCacheStorage::Fp8KeyNvfp4Value);
+        if (NINFER_ENABLE_NVFP4_FAMILY) {
+            failures += full_append_case(kv_heads, KvCacheStorage::Nvfp4Group16);
+            failures += full_append_case(kv_heads, KvCacheStorage::Fp8KeyNvfp4Value);
+        }
     }
     failures += full_append_case(2, KvCacheStorage::Int8Group64, 129);
     failures += full_append_case(2, KvCacheStorage::Fp8E4M3Row256, 129);
-    failures += full_append_case(2, KvCacheStorage::Nvfp4Group16, 129);
-    failures += full_append_case(2, KvCacheStorage::Fp8KeyNvfp4Value, 129);
+    if (NINFER_ENABLE_NVFP4_FAMILY) {
+        failures += full_append_case(2, KvCacheStorage::Nvfp4Group16, 129);
+        failures += full_append_case(2, KvCacheStorage::Fp8KeyNvfp4Value, 129);
+    }
     failures += run_case(1, 0, 0, false, {0, 1, 2});
     failures += run_case(1, 1, 63, false, {2, 3, 4});
     failures += run_case(16, 7, 60, false, {5, 1, 4}, 5);

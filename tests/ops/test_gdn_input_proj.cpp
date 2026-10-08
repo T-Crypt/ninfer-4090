@@ -295,6 +295,10 @@ int run_nvfp4_case(DevicePackedWeight& parent, std::int32_t tokens, ops::LinearP
 }
 
 int run_nvfp4() {
+    if (!NINFER_ENABLE_NVFP4_FAMILY) {
+        std::cout << "gdn_input_proj: SKIP nvfp4: NVFP4 family not built (sm_89 port)\n";
+        return 0;
+    }
     constexpr std::int32_t kHidden = 5120;
     constexpr std::int32_t kRows   = 16384;
     quantized_weight::PatternedWeightOptions options;

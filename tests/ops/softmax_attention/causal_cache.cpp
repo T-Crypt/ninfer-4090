@@ -2683,11 +2683,28 @@ int run_softmax_attention_causal_cache_tests(std::optional<KvCacheStorage> selec
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }
+    if (selected && !NINFER_ENABLE_NVFP4_FAMILY &&
+        (*selected == KvCacheStorage::Nvfp4Group16 ||
+         *selected == KvCacheStorage::Fp8KeyNvfp4Value)) {
+        std::cout << "softmax_attention: SKIP " << cache_name(*selected)
+                  << ": NVFP4 family not built (sm_89 port)\n";
+        return 77;
+    }
+    if (!selected && !NINFER_ENABLE_NVFP4_FAMILY) {
+        std::cout
+            << "softmax_attention: SKIPPED nvfp4 and k8v4 causal-cache cases: NVFP4 family not "
+               "built (sm_89 port)\n";
+    }
     int failures = 0;
     for (const auto storage :
          {KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64, KvCacheStorage::Fp8E4M3Row256,
           KvCacheStorage::Nvfp4Group16, KvCacheStorage::Fp8KeyNvfp4Value}) {
         if (selected && storage != *selected) continue;
+        if (!NINFER_ENABLE_NVFP4_FAMILY &&
+            (storage == KvCacheStorage::Nvfp4Group16 ||
+             storage == KvCacheStorage::Fp8KeyNvfp4Value)) {
+            continue;
+        }
         const int current = run_storage_cases(storage);
         std::cout << (current ? "FAIL" : "PASS") << " causal_softmax_attention "
                   << cache_name(storage) << " public-contract correctness\n";

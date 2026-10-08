@@ -347,6 +347,11 @@ int run_q8() {
 }
 
 int run_nvfp4() {
+    if (!NINFER_ENABLE_NVFP4_FAMILY) {
+        std::cout
+            << "gdn_input_proj_conv_record: SKIP nvfp4: NVFP4 family not built (sm_89 port)\n";
+        return 0;
+    }
     constexpr std::int32_t kHidden    = 5120;
     constexpr std::int32_t kValueRows = 6144;
     constexpr std::int32_t kZRows     = 6144;
