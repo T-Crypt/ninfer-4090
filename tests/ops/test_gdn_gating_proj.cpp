@@ -473,14 +473,29 @@ int run_norm_projection_case(const Geometry& geometry, std::int32_t tokens, std:
 }
 
 int verify_workspace_capacity_contract(const Geometry& geometry,
-                                       std::initializer_list<std::int32_t> route_endpoints) {
+                                       const std::vector<std::int32_t>& route_endpoints,
+                                       const bool scan_full_interval) {
     const std::int32_t last = *std::max_element(route_endpoints.begin(), route_endpoints.end());
     const std::size_t interval =
         ops::gdn_gating_proj_workspace_capacity_bytes(geometry.heads, geometry.hidden, 1, last);
     std::size_t witness = 0;
-    for (const std::int32_t tokens : route_endpoints) {
-        witness = std::max(witness, ops::gdn_gating_proj_workspace_capacity_bytes(
-                                        geometry.heads, geometry.hidden, tokens, tokens));
+    if (scan_full_interval) {
+        // KKCF9MR: on sm_89 the carried route catalog (bf16_gdn_gating_proj_plan.cpp) routes
+        // 9..1280 tokens to MmaCooperativeSplit8, whose per-token workspace peaks at the
+        // route's upper bound (1280 tokens -> 3,932,160 B for the 27B geometry) - a boundary
+        // upstream's static endpoint list never witnesses. Scanning the whole interval on the
+        // host takes a few milliseconds, so take the exact maximum instead of calibrating
+        // endpoints by hand. sm_100+ keeps upstream's static endpoint witness.
+        for (std::int32_t t = 1; t <= last; ++t) {
+            witness = std::max(witness,
+                               ops::gdn_gating_proj_workspace_capacity_bytes(geometry.heads,
+                                                                              geometry.hidden, t, t));
+        }
+    } else {
+        for (const std::int32_t tokens : route_endpoints) {
+            witness = std::max(witness, ops::gdn_gating_proj_workspace_capacity_bytes(
+                                            geometry.heads, geometry.hidden, tokens, tokens));
+        }
     }
     int failures = 0;
     if (interval != witness) {
@@ -515,8 +530,14 @@ int main() {
     const DeviceExecutionView execution{nullptr, device.multiprocessor_count()};
     const DeviceExecutionView norm_execution{device.stream, device.multiprocessor_count()};
     int failures = 0;
-    failures += verify_workspace_capacity_contract(kQwen27, {1, 8, 1024, 2048, 4096, 4097});
-    failures += verify_workspace_capacity_contract(kQwen35, {1, 127, 1024, 2048, 4096, 4097});
+    // KKCF9MR: on sm_89 the carried route catalog's per-token peak sits at a cooperative
+    // route upper bound (1280 tokens for the 27B split8 route) that upstream's static
+    // endpoint list does not witness, so scan the full interval on the host there. sm_100+
+    // keeps upstream's calibrated endpoint lists unchanged.
+    const bool sm89 = device_arch_major() < 10;
+    failures += verify_workspace_capacity_contract(kQwen27, {1, 8, 1024, 2048, 4096, 4097}, sm89);
+    failures += verify_workspace_capacity_contract(kQwen35, {1, 127, 1024, 2048, 4096, 4097},
+                                                   sm89);
 
     // Every registered 27B projection route, including predicated and full token tiles.
     for (const std::int32_t tokens : {1, 8, 9, 1024, 1025, 2049, 4097}) {

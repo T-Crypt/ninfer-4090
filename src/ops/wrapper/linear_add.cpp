@@ -112,9 +112,6 @@ std::size_t linear_add_workspace_capacity_bytes(QType qtype, std::int32_t output
         return 0;
     }
     if (qtype == QType::Q5_G64_FP16) {
-        if (policy != LinearPolicy::A16Only && policy != LinearPolicy::AllowA8) {
-            throw std::invalid_argument("linear_add workspace: Q5 admits only A16 or A8");
-        }
         return detail::q5_linear_add_capacity_workspace_bytes(output_rows, input_rows, input_rows,
                                                               min_tokens, max_tokens, policy);
     }
@@ -187,9 +184,6 @@ void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, LinearPo
     }
 
     if (w.qtype == QType::Q5_G64_FP16) {
-        if (policy != LinearPolicy::A16Only && policy != LinearPolicy::AllowA8) {
-            throw std::invalid_argument("Q5 linear_add admits only A16 or A8");
-        }
         require_q5(w);
         const bool supported_shape = (w.n == 5120 && w.k == 17408) || (w.n == 5120 && w.k == 6144);
         if (!supported_shape) { throw std::invalid_argument("linear_add: unsupported Q5 shape"); }

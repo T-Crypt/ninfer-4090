@@ -305,10 +305,52 @@ std::vector<float> materialize_weight_rows(const HostWeight& weight,
 
 bool cuda_available() { return !test::cuda_unavailable(); }
 
+namespace {
+
+// True when the case for `t` runs the graph-capture (AllowA4) and permissive
+// (AllowA8) replays in addition to the default-policy dispatch.
+bool case_replays(WeightFormat format, const ShapeCase& shape, std::int32_t t) {
+    return (t == 128 && format == WeightFormat::Q5G64F16S) ||
+           std::find(shape.graph_tokens.begin(), shape.graph_tokens.end(), t) !=
+               shape.graph_tokens.end();
+}
+
+// The case runs the default (A16Only) policy and, when it replays, AllowA4 and
+// AllowA8 as well. Formats whose routes are policy-independent report the same
+// zero capacity for every policy, so this only ever widens the arena for
+// formats that genuinely stage quantized activations (Q5's INT8 prefill route).
+std::size_t policies_workspace_bytes(QType qtype, std::int32_t n, std::int32_t k,
+                                     std::int32_t min_tokens, std::int32_t max_tokens,
+                                     const bool replays) {
+    std::size_t bytes =
+        ops::linear_add_workspace_capacity_bytes(qtype, n, k, min_tokens, max_tokens);
+    if (!replays) { return bytes; }
+    bytes = std::max(
+        bytes,
+        ops::linear_add_workspace_capacity_bytes(qtype, n, k, ops::LinearPolicy::AllowA4,
+                                                 min_tokens, max_tokens));
+    bytes = std::max(
+        bytes,
+        ops::linear_add_workspace_capacity_bytes(qtype, n, k, ops::LinearPolicy::AllowA8,
+                                                 min_tokens, max_tokens));
+    return bytes;
+}
+
+} // namespace
+
 int run_shape(std::string_view label, WeightFormat format, const ShapeCase& shape) {
     const std::vector<std::int32_t> tokens = conformance_tokens(shape);
     if (tokens.empty()) { throw std::invalid_argument("linear_add test: no token cases"); }
     const std::int32_t maximum_t = tokens.back();
+
+    // The arena is sized per policy over the token range that policy actually executes:
+    // A16Only runs at every token, the AllowA4/AllowA8 replays only at the replay
+    // tokens. Sizing A8 over the full range would over-reserve the arena for shapes
+    // whose largest token never replays.
+    std::int32_t maximum_replay_t = 0;
+    for (const std::int32_t t : tokens) {
+        if (case_replays(format, shape, t)) { maximum_replay_t = std::max(maximum_replay_t, t); }
+    }
 
     const std::vector<std::int32_t> oracle_rows =
         shape.full_output ? all_indices(shape.n) : sampled_indices(shape.n);
@@ -329,8 +371,25 @@ int run_shape(std::string_view label, WeightFormat format, const ShapeCase& shap
     device_weight.copy_from_host(host_payload.data(), host_payload.size());
     const Weight weight = make_device_weight_view(host_weight, device_weight.data());
 
-    const std::size_t workspace_bytes =
+    // Size the arena for the policies the cases execute: A16Only over the full token
+    // range, plus AllowA4/AllowA8 over the replay-token range when any case replays.
+    // Sizing the replay policies over the full range would over-reserve the arena for
+    // shapes whose largest token never replays, which the high-water witness check
+    // below would then reject.
+    std::size_t workspace_bytes =
         ops::linear_add_workspace_capacity_bytes(qtype, shape.n, shape.k, 1, maximum_t);
+    if (maximum_replay_t > 0) {
+        workspace_bytes = std::max(
+            workspace_bytes,
+            ops::linear_add_workspace_capacity_bytes(qtype, shape.n, shape.k,
+                                                     ops::LinearPolicy::AllowA4, 1,
+                                                     maximum_replay_t));
+        workspace_bytes = std::max(
+            workspace_bytes,
+            ops::linear_add_workspace_capacity_bytes(qtype, shape.n, shape.k,
+                                                     ops::LinearPolicy::AllowA8, 1,
+                                                     maximum_replay_t));
+    }
     WorkspaceArena workspace(std::max<std::size_t>(workspace_bytes, 256));
 
     int failures              = 0;
@@ -364,9 +423,7 @@ int run_shape(std::string_view label, WeightFormat format, const ShapeCase& shap
             ops::linear_add(input, weight, residual_out, workspace, nullptr);
             test::cuda_check(cudaDeviceSynchronize(), "synchronize linear_add");
             verify_result();
-            if ((t == 128 && format == WeightFormat::Q5G64F16S) ||
-                std::find(shape.graph_tokens.begin(), shape.graph_tokens.end(), t) !=
-                    shape.graph_tokens.end()) {
+            if (case_replays(format, shape, t)) {
                 cudaStream_t stream;
                 cudaGraph_t graph;
                 cudaGraphExec_t executable;
@@ -417,8 +474,12 @@ int run_shape(std::string_view label, WeightFormat format, const ShapeCase& shap
             ++failures;
             continue;
         }
+        // The case's high water mark spans every policy it dispatched: A16Only always,
+        // plus AllowA4/AllowA8 when it ran the replays. Compare against the capacity
+        // those policies report for this exact token count.
         const std::size_t exact_workspace =
-            ops::linear_add_workspace_capacity_bytes(qtype, shape.n, shape.k, t, t);
+            policies_workspace_bytes(qtype, shape.n, shape.k, t, t,
+                                     case_replays(format, shape, t));
         if (workspace.used() != 0 || workspace.peak_used() != exact_workspace) {
             std::cerr << case_label << ": exact workspace query/execution high-water mismatch\n";
             ++failures;
