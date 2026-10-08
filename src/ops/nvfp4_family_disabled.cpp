@@ -9,6 +9,11 @@
 #include "ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_plan.h"
 #include "ops/kv_cache/append/launch.h"
 
+#include "ops/softmax_attention/dense/causal_cache/k8v4/launch.h"
+#include "ops/softmax_attention/dense/causal_cache/k8v4/plan.h"
+#include "ops/softmax_attention/dense/causal_cache/nvfp4/launch.h"
+#include "ops/softmax_attention/dense/causal_cache/nvfp4/plan.h"
+
 #include <stdexcept>
 
 namespace ninfer::ops::detail {
@@ -194,6 +199,57 @@ void kv_cache_append_k8v4_launch(const Tensor& k, const Tensor& v, const Tensor&
 void kv_cache_append_k8v4_batch_launch(const Tensor& k, const Tensor& v, const Tensor& positions,
                                         const Tensor& valid_columns, const Tensor& table_rows,
                                         PagedKVBatchLayerView cache, cudaStream_t stream) {
+    throw std::invalid_argument(
+        "NVFP4-family ops are Blackwell-only (sm_120a) and are not built into this Ada "
+        "(sm_89) target");
+}
+
+
+// -- ops/softmax_attention/dense/causal_cache/{nvfp4,k8v4} --
+
+void k8v4_kv_append_attention(const Tensor&, const Tensor&, const Tensor&, const Tensor&,
+                              const Tensor&, const Tensor&, float, PagedKVBatchLayerView,
+                              CausalAttentionExecutionEnvelope, DeviceArena&, Tensor&,
+                              cudaStream_t) {
+    throw std::invalid_argument(
+        "NVFP4-family ops are Blackwell-only (sm_120a) and are not built into this Ada "
+        "(sm_89) target");
+}
+
+void nvfp4_kv_append_attention(const Tensor&, const Tensor&, const Tensor&, const Tensor&,
+                               const Tensor&, const Tensor&, float, PagedKVBatchLayerView,
+                               CausalAttentionExecutionEnvelope, DeviceArena&, Tensor&,
+                               cudaStream_t) {
+    throw std::invalid_argument(
+        "NVFP4-family ops are Blackwell-only (sm_120a) and are not built into this Ada "
+        "(sm_89) target");
+}
+
+std::size_t k8v4_kv_workspace_bytes(int, int, int, int, CausalAttentionExecutionEnvelope) {
+    throw std::invalid_argument(
+        "NVFP4-family ops are Blackwell-only (sm_120a) and are not built into this Ada "
+        "(sm_89) target");
+    return {};
+}
+
+std::size_t nvfp4_kv_workspace_bytes(int, int, int, int, CausalAttentionExecutionEnvelope) {
+    throw std::invalid_argument(
+        "NVFP4-family ops are Blackwell-only (sm_120a) and are not built into this Ada "
+        "(sm_89) target");
+    return {};
+}
+
+void k8v4_kv_cached_attention(const Tensor&, const Tensor&, float, const PagedKVLayerView&,
+                              CausalAttentionExecutionEnvelope, DeviceArena&, Tensor&,
+                              cudaStream_t) {
+    throw std::invalid_argument(
+        "NVFP4-family ops are Blackwell-only (sm_120a) and are not built into this Ada "
+        "(sm_89) target");
+}
+
+void nvfp4_kv_cached_attention(const Tensor&, const Tensor&, float, const PagedKVLayerView&,
+                               CausalAttentionExecutionEnvelope, DeviceArena&, Tensor&,
+                               cudaStream_t) {
     throw std::invalid_argument(
         "NVFP4-family ops are Blackwell-only (sm_120a) and are not built into this Ada "
         "(sm_89) target");
