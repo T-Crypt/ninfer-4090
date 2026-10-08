@@ -279,3 +279,31 @@ measurement, never by relaxation without numbers.
 build (`port/v3-forward`). Builds at `-j 4` maximum, `-k 0` for surveys. The RTX 4090 shares VRAM with
 llama-swap — subagent runs load the 27B (~23 GiB), leaving ~1.4 GiB for test contexts. Board: stage-1
 ticket `KKCF9MR` (Done), stage-2 ticket `2F8429K` (In progress).
+
+## Round 2 close (2026-10-08, later same day)
+
+All three carry-integration failures landed and `port/v3-forward` is **pushed** (`5348f150`):
+
+1. **gdn_gating route-endpoint witness** — the sm_89 catalog's peaks are at t=1280 (split8 upper
+   bound, 3,932,160 B) and t=2688 (split2 bound); the test now scans the full interval on the host
+   (~3 ms) on sm_89 instead of hand-calibrated endpoints; sm_100+ keeps upstream's lists.
+2. **q5 linear_add** — correction to the earlier hypothesis: the merged A16 route table was
+   **byte-identical to upstream** (nothing lost); the real chain was the policy-aware wrapper gate
+   rejecting the test's AllowA4 graph replay plus the AllowA8 path routing to the fork's Int8
+   route, whose staging workspace the test's policy-less arena sizing never reserved →
+   `bad_alloc` in graph replay. Fix: per-policy arena sizing in the shared linear_add harness
+   (exact `==` accounting preserved; bf16/q4/q8 values bit-identical).
+3. **int8-g64 append** — upstream's dedicated `Int8Group64` branch restored in `launch_full`
+   (normalized Hadamard key plane, byte-identical to `d44ab584`), fork storage-mode template now
+   serves only the four fork storages. Verified: the exact previously-failing fragmented-mapping
+   case (W=65 B=1 keys=8225) passes with zero mismatches; `kv_cache_append` green.
+
+**Environmental note for the next session:** with the 27B resident, ~1 GiB VRAM stays free and
+`ninfer_softmax_attention_test` + `ninfer_linear_q5_a16_test` abort on raw-`cudaMalloc` at their
+32768-context cases (pre-carry behaves identically — the case tables are byte-identical to
+upstream). With the model unloaded (≥ ~1.5 GiB free) the full binaries should complete; that is the
+one remaining full-gate step, zero code uncertainty attached.
+
+**Round 3 (stage 3 enabler):** the deferred `src/targets/** → src/models/qwen3_5/**` rewrites
+(29 inventory rows) — the engine glue for KV-mode plumbing, variant/geometry config, MTP3, vision.
+Then stage 3 proper (converter check → v3 artifact → serve at 262K → greedy parity vs `46645ada`).
