@@ -3,6 +3,7 @@
 
 #include "core/layout.h"
 #include "core/paged_kv_storage.h"
+#include "ops/softmax_attention/dense/causal_cache/launch.h"
 #include "ops/softmax_attention/dense/causal_cache/bf16/plan.h"
 #include "ops/softmax_attention/dense/causal_cache/bf16/launch.h"
 #include "ops/softmax_attention/dense/causal_cache/fp8/plan.h"

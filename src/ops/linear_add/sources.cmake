@@ -24,6 +24,8 @@ target_sources(ninfer_ops PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/q8/q8_linear_add_gemm_grouped.cu"
   "${CMAKE_CURRENT_LIST_DIR}/q8/q8_linear_add_plan.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/../wrapper/linear_add.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/q5/q5_linear_add_int8.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/q5/q5_linear_add_gemv.cu"
 )
 
 if(NINFER_ENABLE_NVFP4_FAMILY)

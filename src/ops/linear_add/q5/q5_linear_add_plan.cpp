@@ -136,7 +136,7 @@ constexpr std::int32_t kWaveCols       = 512;
 constexpr std::int32_t kNarrowTailCols = 192;
 
 void launch_wide_with_narrow_tail(const Tensor& x, const Weight& w, Tensor& residual_out,
-                                  WorkspaceArena& ws, cudaStream_t stream) {
+                                  WorkspaceArena& ws, LinearPolicy policy, cudaStream_t stream) {
     const std::int32_t cols = x.ne[1];
     const std::int32_t wide = (cols / kWaveCols) * kWaveCols;
     const std::int32_t tail = cols - wide;
@@ -152,8 +152,9 @@ void launch_wide_with_narrow_tail(const Tensor& x, const Weight& w, Tensor& resi
     const Tensor x_tail = x.slice(1, wide, tail);
     Tensor out_tail     = residual_out.slice(1, wide, tail);
     q5_linear_add_execute_plan(
-        q5_linear_add_resolve_plan({residual_out.ne[0], x.ne[0], w.padded_shape[1], x_tail.ne[1]}),
-        x_tail, w, out_tail, ws, stream);
+        q5_linear_add_resolve_plan({residual_out.ne[0], x.ne[0], w.padded_shape[1], x_tail.ne[1]},
+                                   policy),
+        x_tail, w, out_tail, ws, policy, stream);
 }
 
 } // namespace
@@ -286,7 +287,7 @@ void q5_linear_add_execute_plan(const Q5LinearAddPlan& plan, const Tensor& x, co
         q5_linear_add_mma_r64_t128_launch(x, w, residual_out, stream);
         return;
     case Q5LinearAddScheduleId::MmaResidualR64T128Tail:
-        launch_wide_with_narrow_tail(x, w, residual_out, ws, stream);
+        launch_wide_with_narrow_tail(x, w, residual_out, ws, policy, stream);
         return;
     }
     throw std::logic_error("q5 linear_add: unknown schedule");
