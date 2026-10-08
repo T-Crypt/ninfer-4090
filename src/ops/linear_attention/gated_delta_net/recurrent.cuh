@@ -66,9 +66,11 @@ __device__ __forceinline__ void normalize_qk_lane(float (&value)[kQkPerLane], in
         float sum = 0.0f;
 #pragma unroll
         for (int i = 0; i < kQkPerLane; ++i) { sum += value[i] * value[i]; }
-        sum       = warp_reduce_sum(sum);
-        float inv = lane == 0 ? rsqrtf(sum + kQkL2NormEps) : 0.0f;
-        inv       = __shfl_sync(kFullWarpMask, inv, 0);
+#pragma unroll
+        for (int mask = kWarpSize / 2; mask > 0; mask >>= 1) {
+            sum += __shfl_xor_sync(kFullWarpMask, sum, mask, kWarpSize);
+        }
+        const float inv = rsqrtf(sum + kQkL2NormEps);
 #pragma unroll
         for (int i = 0; i < kQkPerLane; ++i) { value[i] *= inv; }
     }
