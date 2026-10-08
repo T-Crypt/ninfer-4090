@@ -219,3 +219,63 @@ Stage-2 scope under this decision:
    stripped, and the fork's own Ada kernels (already compile clean) carried as-is.
 4. **Converter check (feeds stage 3)**: the donor's v3 converter is nvfp4-first; it must still emit Ada-compatible
    formats (fp8/q4/q5/i8 weights, rk4v4-e8 KV) for the 4090 artifact. Verify before stage 3.
+
+## Stage 2 status + next-round handoff (2026-10-08, end of round 1)
+
+**Where things stand.** Stage 1 (KKCF9MR, Done) + stage 2's upstream-side half are complete and
+verified: the v3 tree (Target A `d44ab584`) builds fully for sm_89 (291/291 targets) and the op-test
+gate passed (120/123 pre-carry; the carry then landed). The fork carry is **in the tree and
+building**; three carry-integration test failures were identified and diagnosed (fixes in flight):
+
+| # | Failure | Verified root cause |
+|---|---|---|
+| 1 | `gdn_gating_proj`: "control interval missed a route endpoint" | The carried sm_89 route catalog is non-monotonic: capacity peaks at t=1024 (3,145,728) and at the cooperative_split2 bound t=2688 (2,064,384), and the fork's unsplit route above 2688 needs zero workspace. The interval query's argmax endpoint (3,932,160) is not in the test's witness list. Fix = arch-qualified endpoints (or programmatic witness discovery) on sm_89. |
+| 2 | `linear_add_q5_a16`: bad_alloc at [5120,17408] T=545/609/705; also `resolve_plan` throws "not admitted" for A16Only | The merged q5 route catalog took the fork's narrower interval table and lost upstream's A16 coverage. Fix = catalog must be a superset: upstream's interval boundaries for its own schedules + the fork's Int8Residual/GemvResidual additions under AllowA8. |
+| 3 | `softmax_attention`: int8-g64 cache-k code/scale "exact mismatch" at fragmented mapping | The carried fork kernel `kv_cache_append_full_i8_kernel` (storage-mode template) intercepts the `Int8Group64` call path and writes fork byte-layout. Fix = explicit storage-kind dispatch: `Int8Group64` → upstream's original kernel; fork template only for the four fork storages (RK4V4E8, RK2V4E8, rotated int8/int4). |
+
+**How the carry was done (this is the reusable method).** Per-row cherry-picks were lossy because the
+fork reorganized its attention family mid-history (`a58a946c` "consolidate softmax attention
+ownership"). The working method is **tip-granularity 3-way merge**: base = `d4929686` (merge-base),
+ours = the sm_89 tree, theirs = fork tip `8e616981` — for every path under `src/ops`, `src/core`,
+`include/ninfer/` (both levels — `types.h` lives at the top level, not under `ops/`). Fork-only files
+(169) restored at tip content; shared files merged per-file; 16 conflicts hand-resolved (INT8-g64
+dispatch integration, KV storage modes, WN32 swiglu schedule, chunked-attention helpers). Launchers
+wired into the family sources.cmake; `common/{act_quant_g64,int8_proj_launch}.cu` into
+basic_sources.cmake. Commits `04137e40`, `7bbb41e2`, `bb4c0db7`, `865e7c59` (+ fixes in flight) on
+`port/v3-forward`, local only until the gate is green.
+
+**Decisions that shaped this (do not relitigate).** NVFP4 never enters the port (Blackwell-only; the
+donor is nvfp4-first and always will be): compiled out + a 26-symbol throwing stub TU; upstream k8v4
+KV (e2m1 values) excluded the same way; the 4090 serves 4-bit KV through the fork's rk4v4-e8 codec.
+fp8 is the sm_89 quantization path; upstream's block-scale mma was unit-scale only, so the plain
+sm_89 fp8 mma is numerically identical. Tracked upstream for the 4090 line is sergiuszm/ninfer-4090;
+Neroued/ninfer is a donor only.
+
+**Mechanical learnings for the next rounds.** (1) Upstream's static cooperative-residency constants
+overflow Ada — the runtime `cudaOccupancyMaxActiveBlocksPerMultiprocessor` query is the fix; capacity
+functions and launch chunking must read the same value or the workspace contract tests drift. (2)
+`mbarrier.try_wait` + `fence.mbarrier_init.release.cluster` are sm_90+ — the shared helpers are
+gated; any new kernel using them inherits safety. (3) PDL device intrinsics must stay arch-gated —
+upstream's kernels call them; the fork's only avoided them by not calling. (4) ptxas reports the
+FIRST failure class then aborts — census from a single build under-reports; always rerun with
+`-k 0` after fixing. (5) The test oracles/endpoints are sm_120a-calibrated — arch-qualify by
+measurement, never by relaxation without numbers.
+
+**Next round, in order:**
+1. Land the three fixes above → full ctest gate → push `port/v3-forward`.
+2. The deferred bucket: `src/targets/** → src/models/qwen3_5/**` rewrites (29 inventory rows) — the
+   engine glue (KV-mode plumbing into the model runtime, variant/geometry config, MTP3, vision).
+   This is the stage-3 enabler.
+3. Stage 3: verify the v3 converter emits Ada-compatible formats (fp8/q4/q5/i8 weights, rk4v4-e8 KV
+   — never nvfp4); produce/pull the v3 Qwen3.8-27B artifact; serve at 262K with MTP3 + vision; gate =
+   greedy fixed-prompt token parity vs the v2 deploy build (`46645ada`).
+4. Stage 4: serve-side commits (46 inventory rows), tolerant tool calls, INT8 prefill re-measure.
+5. Stage 5: rebase onto Target B. Upstream is at `81c8ce09` (+127 over the fork, moving ~10/day) —
+   **pin Target B to whatever is head when stage 4 completes; do not chase.**
+6. Stage 6: bench vs `deploy/ninfer-serve-46645ada` before any deploy switch.
+
+**Environment facts.** Worktrees: `~/ninfer-4090` production (detached `8e616981`, llama-swap serves
+`ninfer-serve-46645ada` from it — hands off), `~/ninfer-v3` docs (`port/v3-catchup`), `~/wt/ninfer-KKCF9MR`
+build (`port/v3-forward`). Builds at `-j 4` maximum, `-k 0` for surveys. The RTX 4090 shares VRAM with
+llama-swap — subagent runs load the 27B (~23 GiB), leaving ~1.4 GiB for test contexts. Board: stage-1
+ticket `KKCF9MR` (Done), stage-2 ticket `2F8429K` (In progress).
