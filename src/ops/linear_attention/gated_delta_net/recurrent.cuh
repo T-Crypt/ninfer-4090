@@ -36,9 +36,9 @@ struct RawQkLane {
     float value[kQkPerLane];
 };
 
-struct RawValueLane {
-    __nv_bfloat16 bits;
-    float value;
+struct RawValuePack {
+    Bf16x4Pack bits;
+    float value[kDvPerWarp];
 };
 
 struct RawGatePair {
@@ -76,13 +76,16 @@ __device__ __forceinline__ void normalize_qk_lane(float (&value)[kQkPerLane], in
     }
 }
 
-__device__ __forceinline__ RawValueLane load_value_lane(const __nv_bfloat16* base, int lane,
+__device__ __forceinline__ RawValuePack load_value_pack(const __nv_bfloat16* base,
                                                         std::uint32_t dv_base) {
-    RawValueLane out{__float2bfloat16(0.0f), 0.0f};
-    if (lane < kDvPerWarp) {
-        out.bits  = base[dv_base + lane];
-        out.value = __bfloat162float(out.bits);
-    }
+    RawValuePack out;
+    out.bits        = load_vec<Bf16x4Pack>(base + dv_base);
+    const float2 lo = bf16x2_to_float2(out.bits.pair[0]);
+    const float2 hi = bf16x2_to_float2(out.bits.pair[1]);
+    out.value[0]    = lo.x;
+    out.value[1]    = lo.y;
+    out.value[2]    = hi.x;
+    out.value[3]    = hi.y;
     return out;
 }
 
@@ -99,8 +102,9 @@ __device__ __forceinline__ RawGatePair load_record_gate(const uint2* gate, std::
 }
 
 __device__ __forceinline__ void apply_gdn_transition(float (&state)[kDvPerWarp][kQkPerLane],
-                                                     const float (&key)[kQkPerLane], float v_local,
-                                                     float g, float beta) {
+                                                     const float (&key)[kQkPerLane],
+                                                     const float (&v)[kDvPerWarp], float g,
+                                                     float beta) {
     const float alpha = expf(g);
 
 #pragma unroll
@@ -110,8 +114,7 @@ __device__ __forceinline__ void apply_gdn_transition(float (&state)[kDvPerWarp][
         for (int c = 0; c < kQkPerLane; ++c) { partial += state[r][c] * key[c]; }
         partial = warp_sum<kWarpSize>(partial);
 
-        const float v_r   = __shfl_sync(0xffffffff, v_local, r, kWarpSize);
-        const float delta = beta * (v_r - alpha * partial);
+        const float delta = beta * (v[r] - alpha * partial);
 
 #pragma unroll
         for (int c = 0; c < kQkPerLane; ++c) { state[r][c] = alpha * state[r][c] + delta * key[c]; }
@@ -174,7 +177,7 @@ struct OutputEffects {
     template <class Access>
     __device__ __forceinline__ static void
     observe_value_gate(const Access&, const RecurrentCoordinates&, std::int32_t,
-                       const RawValueLane&, const RawGatePair&) {}
+                       const RawValuePack&, const RawGatePair&) {}
 
     template <bool NormalizeInputs, class Access>
     __device__ __forceinline__ static void
@@ -197,7 +200,7 @@ struct RecordEffects {
     template <class Access>
     __device__ __forceinline__ static void
     observe_value_gate(const Access& access, const RecurrentCoordinates& coord, std::int32_t token,
-                       const RawValueLane& value, const RawGatePair& gate) {
+                       const RawValuePack& value, const RawGatePair& gate) {
         access.store_value(coord, token, value);
         access.store_gate(coord, token, gate);
     }
@@ -218,7 +221,7 @@ struct FoldEffects {
     template <class Access>
     __device__ __forceinline__ static void
     observe_value_gate(const Access&, const RecurrentCoordinates&, std::int32_t,
-                       const RawValueLane&, const RawGatePair&) {}
+                       const RawValuePack&, const RawGatePair&) {}
 
     template <bool NormalizeInputs, class Access>
     __device__ __forceinline__ static void
@@ -426,11 +429,11 @@ struct RecordAccess {
     }
 
     __device__ __forceinline__ void store_value(const RecurrentCoordinates& coord,
-                                                std::int32_t token, const RawValueLane& raw) const {
-        if (coord.lane < kDvPerWarp) {
+                                                std::int32_t token, const RawValuePack& raw) const {
+        if (coord.lane == 0) {
             __nv_bfloat16* destination =
                 value_record + (column(coord, token) * heads.H_v + coord.value_head) * kStateDim;
-            destination[coord.dv_base + coord.lane] = raw.bits;
+            store_vec(destination + coord.dv_base, raw.bits);
         }
     }
 
@@ -620,8 +623,8 @@ run_recurrent_sequence(float (&state)[kDvPerWarp][kQkPerLane], const Access& acc
 
     for (std::int32_t token = 0; token < valid; ++token) {
         const RawGatePair gate = access.load_gate(coord, token);
-        const RawValueLane value =
-            load_value_lane(access.value_ptr(coord, token), coord.lane, coord.dv_base);
+        const RawValuePack value =
+            load_value_pack(access.value_ptr(coord, token), coord.dv_base);
         Effects::observe_value_gate(access, coord, token, value, gate);
 
         apply_gdn_transition(state, key.value, value.value, gate.g, gate.beta);

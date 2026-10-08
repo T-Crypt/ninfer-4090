@@ -257,23 +257,6 @@ void require_shape35(const Weight& w, const char* name) {
     }
 }
 
-template <class Geometry, int SplitK>
-constexpr std::int32_t cooperative_resident_ctas_per_sm() noexcept {
-    static_assert(SplitK > 1);
-    if constexpr (std::is_same_v<Geometry, Bf16Gdn27Geometry>) {
-        static_assert(SplitK == 8 || SplitK == 4 || SplitK == 2);
-        // Qualified on the sm_120a build: BN128 split-8 uses 256 threads and split-4/2 use
-        // 512 threads; registers and 40-KiB shared memory admit two resident CTAs per SM.
-        return 2;
-    } else {
-        static_assert(std::is_same_v<Geometry, Bf16Gdn35Geometry>);
-        static_assert(SplitK == 32 || SplitK == 16 || SplitK == 8 || SplitK == 4 || SplitK == 2);
-        // BN64 split-32 is register-limited to two resident CTAs per SM. The remaining
-        // specializations admit four. These are kernel facts, not a device-wide SM-count policy.
-        return SplitK == 32 ? 2 : 4;
-    }
-}
-
 template <class Geometry, int SplitK, int Warps = kBf16GdnWarps, bool NormalizeInput = false,
           int NormTokenCapacity = 0>
 bool launch_bf16_prefill_mma(Bf16GdnGatingTokenVariant variant, const Tensor& x,
@@ -357,33 +340,23 @@ bool launch_bf16_prefill_mma(Bf16GdnGatingTokenVariant variant, const Tensor& x,
     } else {
         constexpr std::int64_t kCtasPerTokenTile =
             static_cast<std::int64_t>(Geometry::kHeads / kBf16GdnBlockM) * SplitK;
-        // KKCF9MR stage 2: cooperative_resident_ctas_per_sm() above is an sm_120a
-        // occupancy fact ("qualified on the sm_120a build"). On sm_89 the same kernel
-        // admits fewer resident CTAs (smaller smem/SM, different register file), which
-        // overflowed cooperative launches (cudaErrorCooperativeLaunchTooLarge). Ask the
-        // runtime for the real occupancy of both token-variant instantiations and take
-        // the conservative min; the static table stays as a fallback.
-        const auto resident_ctas_per_sm_fn = [&](const bool full_tokens) {
-            const auto fn = full_tokens
-                ? bf16_gdn_gating_proj_gemm_mma_kernel<Geometry, SplitK, true, Warps,
-                                                       NormalizeInput, NormTokenCapacity>
-                : bf16_gdn_gating_proj_gemm_mma_kernel<Geometry, SplitK, false, Warps,
-                                                       NormalizeInput, NormTokenCapacity>;
-            CUDA_CHECK(cudaFuncSetAttribute(
-                fn, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemBytes));
+        // Cooperative grids must fit concurrently on the active device. Register
+        // allocation differs between SM89 and SM120, and between full/tail kernels.
+        const auto resident_blocks = [&](auto full_tokens) {
+            constexpr bool FullTokens = decltype(full_tokens)::value;
+            auto kernel = bf16_gdn_gating_proj_gemm_mma_kernel<Geometry, SplitK, FullTokens, Warps,
+                                                               NormalizeInput, NormTokenCapacity>;
+            CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                            kSmemBytes));
             int blocks = 0;
-            CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks, fn, block.x,
+            CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks, kernel, Warps * 32,
                                                                      kSmemBytes));
             return blocks;
         };
-        const std::int32_t kResidentCtasPerSm = [&] {
-            const int queried =
-                std::min(resident_ctas_per_sm_fn(true), resident_ctas_per_sm_fn(false));
-            return queried > 0 ? queried
-                               : cooperative_resident_ctas_per_sm<Geometry, SplitK>();
-        }();
+        const int resident_per_sm =
+            std::min(resident_blocks(std::true_type{}), resident_blocks(std::false_type{}));
         const std::int64_t resident_ctas =
-            static_cast<std::int64_t>(multiprocessor_count) * kResidentCtasPerSm;
+            static_cast<std::int64_t>(multiprocessor_count) * resident_per_sm;
         const std::int64_t max_token_tiles = resident_ctas / kCtasPerTokenTile;
         if (max_token_tiles < 1) { return false; }
 

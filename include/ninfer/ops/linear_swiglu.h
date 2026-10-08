@@ -26,7 +26,8 @@ namespace ninfer::ops {
                                                                  std::int32_t max_tokens);
 
 /**
- * Policy-bearing capacity query. Q4/Q8 use A16 under every policy. NVFP4 uses A16 under
+ * Policy-bearing capacity query. Q4/Q8 use A16 under every policy; Q4 additionally admits
+ * AllowA8. W8 admits A16Only. NVFP4 uses A16 under
  * A16Only/AllowA8 through T=16; AllowA4 accepts every positive T. Row-scaled FP8 accepts all
  * policies, with A8 permitted by AllowA8/AllowA4.
  * A permissive policy covers whichever qualified route the private resolver selects across the
@@ -62,7 +63,9 @@ linear_swiglu_workspace_capacity_bytes(QType qtype, std::int32_t gate_up_rows,
  *   Production routes may fuse or materialize gate/up and may choose their natural accumulator,
  *   staging, and workspace precision; those private choices are not semantic rounding boundaries.
  *   AllowA8/AllowA4 permit FP8 activation quantization; route thresholds are implementation
- * choices.
+ *   choices. Q4 under AllowA8 uses private symmetric group-64 INT8 activation
+ *   quantization and INT8 contraction at every positive T, with FP32 cross-group accumulation.
+ *   Its BF16 output is checked against the same exact-decode/FP64 oracle under the A8 criterion.
  *
  * Effects:
  *   Writes the full output; x/weight and output must not alias.

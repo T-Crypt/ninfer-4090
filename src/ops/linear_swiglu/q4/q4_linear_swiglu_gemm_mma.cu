@@ -12,8 +12,12 @@
 namespace ninfer::ops::detail {
 namespace {
 
-using GateUpC40Cfg  = GemmCfg<64, 40, 64, 64, 8, 2, 1, false, true, true>;
-using GateUpC128Cfg = GemmCfg<64, 128, 64, 64, 16, 2, 1, false, true, true>;
+using GateUpC40Cfg = GemmCfg<64, 40, 64, 64, 8, 2, 1, false, true, true>;
+using GateUpC48Cfg = GemmCfg<64, 48, 64, 64, 8, 2, 1, false, true, true>;
+// WN32 (4 warps) measured against the inherited WN16 on sm_89 with the
+// variants bench: +1.3% at T=1024 and +3.4% at T=2048, tied at T=512. The
+// sm_120a-tuned WN16 remains correct; this is an Ada occupancy preference.
+using GateUpC128Cfg = GemmCfg<64, 128, 64, 64, 32, 2, 1, false, true, true>;
 
 template <class Cfg, bool Full>
 void launch_folded(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {

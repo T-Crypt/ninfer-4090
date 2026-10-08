@@ -30,6 +30,10 @@ inline constexpr std::size_t kDefaultHostKvCapacityBytes = 8ULL << 30;
 enum class KvCacheStorage : std::uint8_t {
     BFloat16,
     Int8Group64,
+    RotatedInt8KeyInt4ValueGroup64,
+    RotatedInt4KeyInt4ValueGroup64,
+    RK4V4E8,
+    RK2V4E8,
     Fp8E4M3Row256,
     Nvfp4Group16,
     Fp8KeyNvfp4Value,
@@ -125,6 +129,19 @@ struct StartupObserver {
     std::function<void(const StartupEvent& event)> callback;
 };
 
+// Outcome of one background auto-save of an involuntarily evicted session. Delivered on the
+// Engine's writer thread; the listener must be thread-safe.
+struct SlotAutoSaveEvent {
+    std::string path;
+    std::uint32_t tokens = 0;
+    std::size_t bytes    = 0;
+    double seconds       = 0.0;
+    std::string error; // empty on success
+    // Set when the spill was refused because the file already holds a deeper snapshot of
+    // this path (the token count on record). Nothing was written; error stays empty.
+    std::optional<std::uint32_t> skipped_behind_tokens;
+};
+
 struct ContextCacheOptions {
     // Engine resolves every optional once at construction. With C=max_concurrency, the enabled
     // defaults are H=C, R=8, Host KV=8 GiB, P=2C, S=max(C,4) and L=2;
@@ -159,13 +176,26 @@ struct EngineOptions {
     std::uint32_t max_pending_requests = 16;
     std::uint32_t pending_timeout_ms   = 30000;
     std::uint32_t prefill_chunk        = 1024;
-    KvCacheStorage kv_cache            = KvCacheStorage::BFloat16;
+    // Retained host-side turn checkpoints per lane (0 disables the ring). Each entry snapshots
+    // the linear-attention state at a past turn boundary so a prompt that diverges mid-history
+    // re-prefills from the nearest checkpoint instead of from zero. Host memory cost per entry
+    // is the model's full GDN state image (~147 MiB on Qwen3.8-27B).
+    std::uint32_t turn_checkpoint_ring = 0;
+    // Before an involuntary eviction destroys a retained session, snapshot it back to the slot
+    // file it was last saved to or restored from (sessions that never touched a slot file are
+    // not covered). The device snapshot runs on the eviction path; the file write runs on a
+    // background writer thread. Explicit erase never auto-saves.
+    bool auto_save_evicted = false;
+    // Optional observer for auto-save outcomes; called on the writer thread.
+    std::function<void(const SlotAutoSaveEvent&)> auto_save_listener;
+    KvCacheStorage kv_cache       = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
     std::size_t media_cache_bytes = kDefaultMediaCacheBytes;
     std::size_t media_live_bytes  = kDefaultMediaLiveBytes;
     // Zero selects a bounded worker count from the detected host concurrency.
     std::uint32_t media_preprocess_threads = 0;
     bool enable_vision                     = false;
+    std::uint32_t vision_max_tokens        = 8192;
     bool use_cuda_graph                    = true;
     ContextCacheOptions context_cache;
     ContextCostOptions context_cost;
@@ -483,6 +513,16 @@ struct ContextCacheHints {
     // Advance the named session lineage when session_key is present. This does not require an
     // anonymous content-matched source to be retained.
     bool update_session_index = true;
+    // Engine-automatic private long anchors. Propose a PrivateLongAnchor capture at each of the
+    // last N message boundaries strictly inside the prompt; the boundary after the final message
+    // is left to the endpoint and rewrite checkpoints. 0 (the default) proposes none, which is
+    // upstream behavior: anchors then exist only where a client placed an explicit
+    // PrivateLongAnchor marker, and no OpenAI or Anthropic request can express one. Retention
+    // stays bounded by ContextCacheOptions::max_long_anchors_per_continuation; a full set
+    // replaces its shallowest anchor, so a continuation converges on its most recent turn
+    // boundaries. Automatic anchors are opportunities, not markers, so they do not count
+    // against the explicit marker limit and merge with an explicit anchor at the same frontier.
+    std::uint32_t automatic_private_anchors = 0;
 };
 
 struct PromptInput {
@@ -774,6 +814,26 @@ struct MaterializationDiagnostics {
     std::uint32_t selected_degradation_units = 0;
     bool selected_maximal_fallback           = false;
 
+    /**
+     * The most reusable candidate the search actually ASSESSED, with what the cost model
+     * charged for it and whether it was physically feasible.
+     *
+     * Every other field here describes the plan that WON, which leaves a request that
+     * re-prefills from root ambiguous between two very different faults: no reuse
+     * candidate was ever generated, or one was generated and then priced worse than
+     * reading 200k tokens again. Production has produced that exact ambiguity repeatedly
+     * (2026-09-01, 2026-09-02) and five out-of-production reproductions failed to settle
+     * it. These three fields separate the cases at the moment of the decision.
+     *
+     * This is the most reuse any CANDIDATE offered, which is decided upstream of planning,
+     * so it is independent of what the search then chose. 0 means no candidate offered any
+     * reuse at all, which points upstream at prefix matching rather than at the planner;
+     * a large value beside a root plan points at the planner.
+     *
+     * One scalar, not a per-target vector: a vector would allocate on the planning path and
+     * would stop this struct's defaulted comparison from being constexpr.
+     */
+    std::uint32_t best_reuse_prompt_tokens = 0;
     std::uint64_t initial_predicted_total_ns = 0;
     std::optional<std::uint64_t> first_improvement_ns;
     std::uint32_t incumbent_improvements         = 0;
@@ -806,6 +866,11 @@ struct GenerationResult {
     GenerationTimings timings;
     GenerationEngineTiming engine_timing;
     SpeculativeStats speculative;
+    // Catalog slot that retained the finished session and that session's identifying digest
+    // (see SlotState) - the handle a client needs for /slots operations. Both stay empty when
+    // the request released its context instead of retaining it.
+    std::int32_t slot = -1;
+    std::string session_digest;
     ThinkingBudgetStats thinking;
 };
 
@@ -850,6 +915,11 @@ struct MemorySummary {
     std::size_t workspace_logical_peak_bytes      = 0;
     std::size_t cuda_graph_allowance_bytes        = 0;
     std::size_t kv_payload_bytes                  = 0;
+    std::size_t text_kv_bytes                     = 0;
+    std::size_t mtp_kv_bytes                      = 0;
+    std::size_t gdn_state_bytes                   = 0;
+    std::size_t dflash_kv_bytes                   = 0;
+    std::size_t replay_records_bytes              = 0;
     std::uint32_t host_state_capacity_slots       = 0;
     std::uint32_t host_state_occupied_slots       = 0;
     std::size_t host_kv_capacity_bytes            = 0;
@@ -892,6 +962,10 @@ struct RuntimeStats {
     std::uint64_t computed_prefill_tokens = 0;
     // Tokens committed by decode rounds; the first token emitted by prefill is excluded.
     std::uint64_t committed_decode_tokens = 0;
+    // Cumulative wall time of prefill and decode execution units. Advances with every unit,
+    // so counter scrapers see rates move during a request rather than at its completion.
+    double prefill_seconds_total = 0.0;
+    double decode_seconds_total  = 0.0;
     // Decode batch executions and the sum of their batch sizes.
     std::uint64_t decode_rounds             = 0;
     std::uint64_t decode_row_rounds         = 0;
@@ -991,6 +1065,51 @@ struct ContextCostSummary {
     std::string hardware_class;
     std::string prefill_signature;
     std::filesystem::path preset_path;
+};
+
+// Session persistence outcomes. Tokens count the resident session depth moved; bytes count the
+// snapshot file payload on disk; session_digest identifies the session (see SlotState).
+struct SlotSaveResult {
+    std::uint32_t tokens = 0;
+    std::uint64_t bytes  = 0;
+    double seconds       = 0.0;
+    std::string session_digest;
+};
+
+struct SlotRestoreResult {
+    std::uint32_t tokens = 0;
+    std::uint64_t bytes  = 0;
+    double seconds       = 0.0;
+    std::string session_digest;
+};
+
+// One retained turn checkpoint of a resident session: the ledger depth it rewinds to and the
+// digest of the ledger prefix up to that frontier (same FNV-1a 64 hex encoding as
+// SlotState::session_digest, computed over the prefix only).
+struct SlotCheckpoint {
+    std::uint32_t frontier = 0;
+    std::string session_digest;
+};
+
+// One Engine lane's occupancy for /slots-style reporting: an active request's prompt size, or
+// the retained resident session. session_digest is a stable identifier of the exact resident
+// token ledger (FNV-1a 64 as 16 hex chars) - equal digests mean the identical session; clients
+// treat it as opaque and may pass it back as a slot-operation precondition. checkpoints lists
+// the retained turn checkpoints (oldest first) a diverging prompt can restore from.
+struct SlotState {
+    bool processing              = false;
+    bool retained                = false;
+    std::uint32_t prompt_tokens  = 0;
+    std::uint32_t cached_tokens  = 0;
+    std::string session_digest;
+    std::vector<SlotCheckpoint> checkpoints;
+};
+
+// Raised when a slot operation's session precondition (if_digest) does not match the lane's
+// resident session.
+class SlotSessionMismatch final : public std::invalid_argument {
+public:
+    using std::invalid_argument::invalid_argument;
 };
 
 struct LoadSummary {

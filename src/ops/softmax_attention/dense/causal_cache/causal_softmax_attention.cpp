@@ -24,10 +24,24 @@
 namespace ninfer::ops {
 namespace {
 
-constexpr std::int32_t kHeadDim             = 256;
-constexpr float kExpectedScale              = 0.0625f;
-constexpr std::int32_t kMaximumVerifyTokens = 16;
-constexpr std::int32_t kMaximumBatchSize    = 8;
+constexpr std::int32_t kHeadDim                      = 256;
+constexpr float kExpectedScale                       = 0.0625f;
+constexpr std::int32_t kMaximumVerifyTokens          = 16;
+constexpr std::int32_t kMaximumBatchSize             = 8;
+constexpr std::uint32_t kTwoChunkPromptVisibleKeys   = 512;
+constexpr std::uint32_t kThreeChunkPromptVisibleKeys = 1024;
+
+std::int32_t causal_attention_chunk_tokens(std::int32_t q_heads, std::int32_t width,
+                                           std::int32_t batch_size, KvCacheStorage storage,
+                                           CausalAttentionExecutionEnvelope envelope) {
+    if (q_heads == 16) return 6;
+    // Balance the two narrow BF16 chunks; INT8 benefits from 5+4/5 at long contexts.
+    if (batch_size == 1 && ((storage == KvCacheStorage::BFloat16 && width >= 9 && width <= 12) ||
+                            (kv_storage_is_int8_family(storage) && width >= 9 && width <= 10 &&
+                             envelope.max_visible_keys > 4096)))
+        return (width + 1) / 2;
+    return 8;
+}
 
 void require_causal_geometry(AttentionHeadGeometry geometry, const char* op) {
     if (!valid_attention_head_geometry(geometry) || geometry.head_dim != kHeadDim ||
@@ -260,6 +274,65 @@ void validate_batched_attention_tensors(const Tensor& q, const Tensor& positions
 }
 
 } // namespace
+
+namespace detail {
+
+CausalAttentionRoute causal_attention_resolve_route(std::int32_t q_heads, std::int32_t width,
+                                                    std::int32_t batch_size, KvCacheStorage storage,
+                                                    CausalAttentionExecutionEnvelope envelope) {
+    if (q_heads == 24 && width <= kMaximumVerifyTokens) {
+        if (batch_size == 1) {
+            std::uint32_t prompt_limit = 0;
+            switch (storage) {
+            case KvCacheStorage::BFloat16:
+                prompt_limit = width <= 4 ? 128 : width <= 8 ? 256 : 640;
+                break;
+            case KvCacheStorage::Int8Group64:
+            // The fork's packed/rotated/E8 modes run the same int8 kernels and follow the
+            // same route thresholds.
+            case KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
+            case KvCacheStorage::RotatedInt4KeyInt4ValueGroup64:
+            case KvCacheStorage::RK4V4E8:
+            case KvCacheStorage::RK2V4E8:
+                prompt_limit = width <= 8 ? 0 : 256;
+                break;
+            case KvCacheStorage::Fp8E4M3Row256:
+                prompt_limit = width <= 4 ? 0 : width <= 8 ? 128 : 320;
+                break;
+            case KvCacheStorage::Nvfp4Group16:
+                prompt_limit = width <= 8 ? 0 : 256;
+                break;
+            case KvCacheStorage::Fp8KeyNvfp4Value:
+                prompt_limit = width <= 4 ? 0 : width <= 8 ? 128 : 320;
+                break;
+            }
+            if (envelope.max_visible_keys <= prompt_limit) return CausalAttentionRoute::Prompt;
+        }
+        return width <= 8 ? CausalAttentionRoute::SmallT : CausalAttentionRoute::ChunkedSmallT;
+    }
+    if (width <= 6) return CausalAttentionRoute::SmallT;
+    if (batch_size > 1) return CausalAttentionRoute::ChunkedSmallT;
+    const std::uint32_t prompt_visible_keys =
+        width <= 12 ? kTwoChunkPromptVisibleKeys : kThreeChunkPromptVisibleKeys;
+    if (q_heads == 16 && width <= kMaximumVerifyTokens &&
+        envelope.max_visible_keys > prompt_visible_keys)
+        return CausalAttentionRoute::ChunkedSmallT;
+    return CausalAttentionRoute::Prompt;
+}
+
+const char* causal_attention_route_name(CausalAttentionRoute route) {
+    switch (route) {
+    case CausalAttentionRoute::SmallT:
+        return "small_t";
+    case CausalAttentionRoute::ChunkedSmallT:
+        return "chunked_small_t";
+    case CausalAttentionRoute::Prompt:
+        return "prompt";
+    }
+    return "unknown";
+}
+
+} // namespace detail
 
 std::size_t causal_softmax_attention_workspace_capacity_bytes(
     AttentionHeadGeometry geometry, KvCacheStorage cache_storage,
