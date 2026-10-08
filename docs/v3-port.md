@@ -182,3 +182,34 @@ targets-tree files). The symbol-grep mapping is provisional; verify per file dur
   the old "2 are upstream merges" made 90+53+2=145.
 - Untouched by design: the 46 inventory rows that only touch `src/serve`/`src/runtime`/apps (stage-4 mapping scope),
   the `~/ninfer-4090` production checkout, llama-swap. Nothing pushed.
+
+## Stage 2 direction (2026-10-08, operator decision + failure taxonomy)
+
+**Operator decision: NVFP4 does not port to sm_89 at all — fp8 is the floor on Ada.** No nvfp4 work; the sm_89 build
+compiles it out. (It stays live in the upstream 120a build.)
+
+Per-file attribution of the 53 ptxas failures (features counted per file from the `-k 0` log):
+
+| Bucket | Files | What breaks | Stage-2 action |
+|---|---|---|---|
+| NVFP4 family | 22 | `.kind::mxf4nvf4`, `.scale_vec::4X`, `cvt.*e2m1*` | Compile out of the sm_89 build |
+| FP8 block-scale MMA | 13 | `mma with block scale .kind::mxf8f6f4` + `.scale_vec::1X` | Rework to sm_89 non-block-scale fp8 mma, scales in software. Includes the 2 k8v4 causal-cache files (9,728 + 8,192 error lines) |
+| FP8 A16 + topk (convert-only) | 8 | `cvt.bf16x2.e4m3x2` only | Mechanical: sm_89 pair-widen outputs f16x2, not bf16x2 — swap the convert or widen scalar |
+| TMA bf16 gemm | 5 | `cp.async.bulk.tensor` + `.tile` + `mbarrier::complete_tx` | Ada schedule rework (cp.async staging) |
+| griddepcontrol (PDL) | 4 | `griddepcontrol` in `q4_q5_gdn_input_*` + `sparse_moe` | Strip the dependent-launch hints (perf-only loss) |
+| k8v4 append | 1 | `cvt.e2m1x2.f32` x128 | Small convert rework |
+
+NVFP4 family = the 14 `.kind::mxf4nvf4` files plus the 8 nvfp4 files that fail on `e2m1` converts / `.op_restrict` /
+cluster scope only (`*_a16`, `nvfp4_launch`, `nvfp4_a4`, `nvfp4_linear_add_a16`, `nvfp4_linear_swiglu_small_t`,
+causal-cache `nvfp4/launch` + `tiled_launch`).
+
+Open questions for the stage-2 review:
+
+1. **Gate strategy**: compile the nvfp4 sources out of the sm_89 build (CMake target split, like `NINFER_SM86`
+   gating in `25c782aa`) vs keeping them but never dispatching. Compile-out is the honest option — they cannot work.
+2. **fp8 rework scope**: which of the 13 block-scale files does the Ada runtime actually dispatch? If the 4090 keeps
+   the fork's own i8 dense prefill + rk4v4-e8 KV, upstream's fp8/k8v4 routes may stay compiled-out at first and the
+   rework only covers what the v3 artifact/loader forces (the 2 k8v4 causal-cache files are the likely
+   load-bearing ones).
+3. **Converter (feeds stage 3)**: the v3 Qwen3.8 artifact for the 4090 must be produced in Ada-compatible formats
+   (q4/q5/i8, rk4v4-e8 KV) — never nvfp4. Confirm the v3 converter still supports those targets.
