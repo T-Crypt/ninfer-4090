@@ -186,6 +186,7 @@ void kv_cache_append_launch(const Tensor& k, const Tensor& v, const Tensor& posi
 void kv_cache_append_batch_launch(const Tensor& k, const Tensor& v, const Tensor& positions,
                                   const Tensor& valid_columns, const Tensor& table_rows,
                                   PagedKVBatchLayerView cache, cudaStream_t stream) {
+#if NINFER_ENABLE_NVFP4_FAMILY
     if (cache.storage == KvCacheStorage::Fp8KeyNvfp4Value) {
         kv_cache_append_k8v4_batch_launch(k, v, positions, valid_columns, table_rows, cache,
                                           stream);
@@ -196,6 +197,16 @@ void kv_cache_append_batch_launch(const Tensor& k, const Tensor& v, const Tensor
                                            stream);
         return;
     }
+#else
+    // NVFP4-family KV storage is Blackwell-only and is not built into this target
+    // (KKCF9MR stage 2). The Ada port serves 4-bit KV through the fork's rk4v4-e8 codec.
+    if (cache.storage == KvCacheStorage::Fp8KeyNvfp4Value ||
+        cache.storage == KvCacheStorage::Nvfp4Group16) {
+        throw std::invalid_argument(
+            "NVFP4-family KV cache storage is Blackwell-only and is not built into this "
+            "target");
+    }
+#endif
     const auto launch = [&]<bool Masked>() {
         const PagedKVBatchMetadata<Masked> metadata{
             .tables = static_cast<const std::int32_t*>(cache.block_tables.data),

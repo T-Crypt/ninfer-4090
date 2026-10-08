@@ -1,15 +1,15 @@
 cmake_minimum_required(VERSION 3.28)
 
-# The current implementation is compiled only for sm_120a. Set and validate the
-# architecture before CUDA compiler detection so CMake never injects a generic
-# host-toolchain default or accepts an unsupported target.
+# Upstream is compiled for sm_120a (Blackwell); the 4090 port adds sm_89 (Ada).
+# Set and validate the architecture before CUDA compiler detection so CMake never
+# injects a generic host-toolchain default or accepts an unsupported target.
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES 120a CACHE STRING "CUDA architectures to build")
 endif()
-if(NOT CMAKE_CUDA_ARCHITECTURES STREQUAL "120a")
+if(NOT CMAKE_CUDA_ARCHITECTURES MATCHES "^(120a|89)$")
   message(FATAL_ERROR
-    "NInfer supports only CMAKE_CUDA_ARCHITECTURES=120a; got "
-    "'${CMAKE_CUDA_ARCHITECTURES}'")
+    "NInfer supports CMAKE_CUDA_ARCHITECTURES=120a (Blackwell) or 89 (Ada, the 4090 "
+    "port); got '${CMAKE_CUDA_ARCHITECTURES}'")
 endif()
 
 project(ninfer LANGUAGES C CXX CUDA)

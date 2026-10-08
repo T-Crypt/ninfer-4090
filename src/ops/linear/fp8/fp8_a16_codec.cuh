@@ -11,8 +11,9 @@
 namespace ninfer::ops::detail {
 
 __device__ __forceinline__ unsigned fp8_e4m3x2_to_bf16x2_bits(unsigned packed) {
-#if __CUDACC_VER_MAJOR__ > 13 || (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 2)
-    // PTX 9.2 exposes the native pair widening on the project's sm_120a target.
+#if (defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000) && \
+    (__CUDACC_VER_MAJOR__ > 13 || (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 2))
+    // PTX 9.2 exposes the native pair widening; Blackwell (sm_100+) only - sm_89 takes the exact FP16 bridge.
     unsigned result;
     asm("cvt.rn.bf16x2.e4m3x2 %0, %1;" : "=r"(result) : "h"(static_cast<std::uint16_t>(packed)));
     return result;
