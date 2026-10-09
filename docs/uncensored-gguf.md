@@ -3,14 +3,16 @@
 This doc tracks `ninfer-uncensored`: a second production line that serves HauhauCS's uncensored Qwen3.8-27B on the
 RTX 4090. The PR stays a draft until the artifact converts, passes its checks and serves through llama-swap.
 Board ticket `0N7219T` on the homelab board; the full operator play-by-play lives in the homelab repo at
-`projects/active/NINFER-UNCENSORED.md`.
+`projects/active/NINFER-UNCENSORED.md`, which is the authority for stage numbering and gates — the list below is a
+mirror and the homelab doc wins when they drift.
 
 ## Why
 
 `HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF` is the dense Qwen3.8-27B with changed weight values.
 It keeps the architecture this fork already serves: 64 layers (48 GDN, 16 full attention), vocab 248320, the native
-NextN MTP head, GGUF arch `qwen35`. On llama.cpp we run it at 131K context and 91.6 t/s. On NInfer it would get
-262K, ~130 t/s decode and the INT8 prefill.
+NextN MTP head, GGUF arch `qwen35`. On llama.cpp we run it at a 131K `-c` setting and 91.6 t/s; on NInfer the same
+checkpoint gets 262K context, ~130 t/s decode and the INT8 prefill — a runtime/setting difference, not a format
+limit (the GGUF itself advertises `qwen35.context_length = 262144`).
 
 The gap: `tools/convert/qwen3_8_27b/convert.py` reads BF16 safetensors in the Hugging Face layout, and HauhauCS
 publishes GGUF only. This branch adds a GGUF-to-HF tool and leaves the engine alone.
@@ -54,9 +56,9 @@ source in a `PROVENANCE.json` sidecar.
 
 - [x] 1. `ninfer-qwen27b` from `46645ada`, `ninfer-uncensored` on top, worktree `~/wt/ninfer-0N7219T`
 - [ ] 2. CPU-only venv (`CUDA_VISIBLE_DEVICES=`), pinned downloads, GGUF SHA256SUMS pass
-- [ ] 3. `gguf_to_hf` writes 1199 tensors matching the official index in name, shape and BF16 dtype
-- [ ] 4. Mapping proof against official shard 1: cosine > 0.99 on all 59 text tensors; mmproj vs official vision equal or cosine > 0.9999
-- [ ] 5. Stock converter on CPU; `tools.artifact.inspect` shows 1184 objects with the official artifact's format counts
+- [ ] 3. `gguf_to_hf` writes 1199 tensors matching the official index in name, shape and BF16 dtype — 866 derived from the GGUF (that is where the mapping risk lives) plus 333 vision copied from the reference
+- [ ] 4. Mapping proof against official shard 1: cosine > 0.99 on all 59 text tensors **and** max-abs-diff ~ 0 (cosine alone cannot catch a missed `+1` on near-constant norm vectors — `validate.py` compares `ours + 1` and flags any norm where the shifted version fits better); mmproj vs official vision equal or cosine > 0.9999. The MTP norms (`mtp.pre_fc_norm_*`, `mtp.norm`) are not in shard 1, but all 18 official shards are local, so gate 4 compares them like every other tensor
+- [ ] 5. Stock converter on CPU; `tools.artifact.inspect` shows the official artifact's format counts (verified 2026-10-08 on `~/ninfer-4090/models/qwen3_8_27b.ninfer`: 1124 objects = 1118 tensors + 6 resources; BF16 582, FP32 96, I32 1, Q4G64_F16S 183, Q5G64_F16S 246, Q6G64_F16S 1, W8G32_F16S 9)
 - [ ] 6. Perplexity `--quick` within ~5% of the official artifact; refusal prompts answered; tool call and image request pass; MTP acceptance and decode t/s recorded
 - [ ] 7. llama-swap entry `NInfer-HauHauCS-27B` serves through `:9090`, no role aliases
 - [ ] 8. Docs and close-out: worktree removed, scratch data deleted
