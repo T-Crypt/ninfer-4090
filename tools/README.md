@@ -13,6 +13,7 @@ for the selected tool.
 |---|---|
 | Build the 27B artifact | [`convert/qwen3_6_27b/`](convert/qwen3_6_27b/) |
 | Build the Qwen3.8-27B artifact | [`convert/qwen3_8_27b/`](convert/qwen3_8_27b/) |
+| Build a HF BF16 tree from a GGUF-only release (e.g. the uncensored HauhauCS tune) | [`convert/gguf_to_hf/`](convert/gguf_to_hf/) |
 | Build the 35B-A3B artifact | [`convert/qwen3_6_35b_a3b/`](convert/qwen3_6_35b_a3b/) |
 | Inspect artifact metadata and objects | [`artifact/inspect.py`](artifact/inspect.py) |
 | Run benchmark matrices | [`bench/`](bench/README.md) |

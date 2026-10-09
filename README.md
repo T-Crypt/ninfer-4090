@@ -1,15 +1,89 @@
-# NInfer-4090
+# NInfer-4090 — Uncensored Qwen3.8-27B (HauhauCS)
 
-NInfer-4090 runs **Qwen3.8-27B** on one 24 GB NVIDIA GeForce RTX 4090. It is an `sm_89` port of
+NInfer-4090 runs **Qwen3.8-27B** on one 24 GB NVIDIA GeForce RTX 4090. This branch (`ninfer-uncensored`,
+the fork's default) serves the **uncensored** Qwen3.8-27B tune published by HauhauCS as GGUF:
+[HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF](https://huggingface.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF).
+It is the same dense Qwen3.8-27B with changed weight values, converted from that GGUF release into this
+engine's groupwise `.ninfer` artifact by the `tools/convert/gguf_to_hf/` tool on this branch (below). The
+engine is an `sm_89` port of
 [NInfer-3090](https://github.com/Don-Chad/ninfer-3090), which derives from
 [Neroued/ninfer](https://github.com/Neroued/ninfer), a specialized C++20/CUDA inference engine.
-The engine loads the official groupwise `.ninfer` artifact, serves OpenAI- and
+It loads the groupwise `.ninfer` artifact, serves OpenAI- and
 Anthropic-compatible APIs, and supports paged KV, compatible-prefix reuse, CUDA Graphs, MTP
 speculative decoding, reasoning-effort control, and ReplaySSM state transactions.
 
 This fork targets `sm_89` and Linux. Blackwell-only NVFP4/W4A4 execution is unavailable; the
 engine uses the same groupwise-int path as the 3090 base. The Windows path and the
 Qwen3.6-35B-A3B target are inherited but untested on the RTX 4090.
+
+## Why this branch exists
+
+HauhauCS publishes GGUF only, and the stock converter (`tools/convert/qwen3_8_27b/convert.py`) reads BF16
+Hugging Face safetensors. `tools/convert/gguf_to_hf/` closes that gap: it dequantizes the GGUF and inverts
+llama.cpp's conversion for this architecture, so the uncensored tune rides the same engine, the same
+262,144-token E8-KV serving profile, and the same MTP3 speculative decoding as the official artifact. No
+engine code changes; the branch carries the conversion tool, its tests, and this documentation.
+
+Against the deployed llama.cpp entry for the same GGUF (91.6 tok/s decode, `--ctx-size 131072`), this
+artifact serves the model's full native 262,144-token context at about 130 tok/s under MTP3, with the INT8
+groupwise prefill.
+
+## The HauhauCS artifact
+
+The source is the `Aggressive` uncensored tune's MTP GGUF release. Facts checked against the actual GGUF
+headers (2026-10-07/08):
+
+| Fact | Value |
+|---|---|
+| Text GGUF | `Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-Q8_K_P.gguf`, 31.46 GB, 866 tensors: 453 `Q8_0`, 53 `BF16` (output head, MTP head), 360 `F32`. Stock ggml types only |
+| Vision GGUF | `mmproj-...-BF16.gguf`, 931 MB (not used for the artifact; vision weights come from the pinned reference) |
+| Architecture | `general.architecture=qwen35`, dense: 64 layers (48 GDN, 16 full attention) + 1 NextN MTP block, vocab 248320, 16 K / 48 V heads at head dim 128, `base_model.0.name=Qwen3.8-27B` |
+
+`tools/convert/gguf_to_hf/` dequantizes every tensor to float32 and inverts llama.cpp's HF-to-GGUF
+transforms in reverse order: the `+1` on the 168 norm tensors (including the two MTP norms that reach it
+through a rename), the conv1d squeeze, the `dt_bias` rename, `A_log` stored as `-exp`, and the
+LinearAttention V-head grouped-to-tiled reorder (16 K / 48 V heads, a permutation that is not its own
+inverse). The output is a complete HF directory: 1,199 BF16 tensors in 20 shards, 55.56 GB - 866 derived
+from the GGUF plus 333 `model.visual.*` tensors copied bit-identical from the pinned reference checkpoint
+(`Qwen/Qwen3.8-27B` @ `1d4bf0f2`), with the six frontend files the converter hashes. The stock
+`qwen3_8_27b` converter then builds the `.ninfer` artifact unchanged (181.8 s on the RTX 4090).
+
+Every stage is gated, and the gates were run against the real official weights, not the tool's own output:
+
+| Gate | Result |
+|---|---|
+| Structure | 1,199/1,199 names and shapes match the official index, all BF16 |
+| Mapping, text | 866/866 tensors vs the full official 18-shard set: 0 below cosine 0.99, worst 0.994197 (`layers.31.self_attn.o_proj.weight`) |
+| Norm `+1` inversion | all 168 norm tensors through the `ours+1` shift test: 0 flags; the 7 MTP norms compare exact (cos 1.000000) |
+| Vision | 333/333 tensors bit-identical to the reference |
+| Artifact inspect | 1,190 objects (1,184 tensors, 6 resources): BF16 627, FP32 96, I32 1, Q4G64 183, Q5G64 246, Q6G64 1, W8G32 30 |
+| Perplexity, `ninfer-ppl-1m-v1` quick, int8 KV | **4.4005** vs 4.3446 on the official artifact (**+1.29%**) |
+| Behavior | refusal probes answered, `/v1/messages` returns structured `tool_use`, vision describes a test image correctly |
+
+The artifact identity (`qwen3.8-27b` / `groupwise-int` / `qwen3_8_27b-v2`) is deliberately kept identical
+to the official artifact so the engine's binder resolves the same `Qwen38GroupwiseInt` profile; the real
+source is recorded in a `PROVENANCE.json` sidecar next to the artifact.
+
+## Measured serving (2026-10-08, live)
+
+Twelve real agent-session requests through llama-swap on the deployed entry (`NInfer-HauHauCS-27B`),
+MTP3 at `--draft-tokens 3`, `rk4v4-e8` KV, 262,144-token context, `--prefill-chunk 1024`, thinking on,
+llama.cpp-compatible `timings` counters:
+
+| Test | Result |
+|---|---|
+| Decode, live agent session, 12 requests | **98.8-135.9 tok/s** (typically 116-135) |
+| Decode, first requests after load | 117.4 / 124.9 / 132.2 / 135.6 tok/s |
+| Prefill, computed prompts (428-9,873 tokens) | 1,442-3,591 tok/s |
+| Prefill, deep prompt (9,251 tokens) | 3,591 tok/s |
+| Shallow prompt, mostly prefix-cache hit (55 tokens, 32 cached) | 303 tok/s effective |
+| Cold load, 20.44 GB artifact, to first token | **40.4-41.5 s** (16.9 GiB weights at ~370 MiB/s); one request in the log paid 84.5 s, i.e. more than the load alone |
+| Warm request, wall time | 0.41-7.39 s including up to 667 output tokens |
+| MTP acceptance, tool-call request | 70.8% (51/72) |
+
+Decode and MTP acceptance are statistically indistinguishable from the official artifact's serving
+profile, as the identical-architecture premise predicts; the perplexity delta above (+1.29%) is the
+weight-change cost, and it sits well inside the ~5% gate the conversion plan set.
 
 ## Measured results on the RTX 4090
 
@@ -111,6 +185,37 @@ docker build --tag ninfer-4090:sm89 .
 NINFER_MODEL_DIR="$PWD/models" bash scripts/download-qwen38.sh
 ```
 
+### Building the uncensored artifact from the HauhauCS GGUF
+
+The serving profiles below point at `models/qwen3_8_27b_hauhaucs.ninfer`, which is built from the
+HauhauCS release in two steps. A CPU-only Python 3.11 environment with `torch`, `numpy`,
+`safetensors`, and `gguf-py` is enough for the first; the second runs on the GPU or CPU.
+
+```bash
+hf download HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF \
+  Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-Q8_K_P.gguf \
+  mmproj-Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-BF16.gguf SHA256SUMS --local-dir gguf
+sha256sum -c gguf/SHA256SUMS --ignore-missing
+
+hf download Qwen/Qwen3.8-27B --revision 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0 \
+  --local-dir reference-qwen38-27b   # frontend files, index, and the vision tensors
+
+python3 -m tools.convert.gguf_to_hf \
+  --gguf gguf/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-Q8_K_P.gguf \
+  --reference-dir reference-qwen38-27b \
+  --out hf-uncensored --vision-from-reference
+
+python3 -m tools.convert.qwen3_8_27b.convert \
+  --model hf-uncensored --dflash2-model <Qwen3.8-27B-DFlash2> \
+  --out models/qwen3_8_27b_hauhaucs.ninfer --device cuda
+```
+
+`gguf_to_hf` refuses to overwrite an existing output index, validates every tensor name and shape
+against the reference index, and prints the per-tensor mapping as it goes; `validate.py` re-checks the
+finished directory against the reference (structure, cosine, and the missed-`+1` norm test). The
+DFlash2 companion is required by the converter's recipe but rides unused when serving with
+`--spec mtp`. Details in [tools/convert/gguf_to_hf/README.md](tools/convert/gguf_to_hf/README.md).
+
 Then start one of the three profiles. The API is available at `http://127.0.0.1:8080/v1`.
 
 The profiles as written run one generation slot. `--max-concurrency 2` is measured
@@ -154,7 +259,7 @@ The E8 Conway-Sloane lattice KV mode (`rk4v4-e8`, ported from
 docker run --rm --gpus all --publish 8080:8080 \
   --volume "$PWD/models:/workspace/models:ro" \
   ninfer-4090:sm89 \
-  ninfer-serve models/qwen3_8_27b.ninfer \
+  ninfer-serve models/qwen3_8_27b_hauhaucs.ninfer \
   --host 0.0.0.0 --port 8080 \
   --max-context 262144 --kv-capacity 262144 \
   --max-concurrency 1 --max-pending-requests 16 \
@@ -175,7 +280,7 @@ code-detail retrieval through 260K tokens.
 docker run --rm --gpus all --publish 8080:8080 \
   --volume "$PWD/models:/workspace/models:ro" \
   ninfer-4090:sm89 \
-  ninfer-serve models/qwen3_8_27b.ninfer \
+  ninfer-serve models/qwen3_8_27b_hauhaucs.ninfer \
   --host 0.0.0.0 --port 8080 \
   --max-context 172032 --kv-capacity 172032 \
   --max-concurrency 1 --max-pending-requests 16 \
@@ -196,7 +301,7 @@ vision on 4-bit keys:
 docker run --rm --gpus all --publish 8080:8080 \
   --volume "$PWD/models:/workspace/models:ro" \
   ninfer-4090:sm89 \
-  ninfer-serve models/qwen3_8_27b.ninfer \
+  ninfer-serve models/qwen3_8_27b_hauhaucs.ninfer \
   --host 0.0.0.0 --port 8080 \
   --max-context 262144 --kv-capacity 262144 \
   --max-concurrency 1 --max-pending-requests 16 \
@@ -392,6 +497,7 @@ GCC 13, and CMake 3.28 or newer; the Docker image builds with CUDA 13.1.
 |---|---|---|---:|---|
 | Qwen3.8-27B | [official NInfer groupwise artifact](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) | `3526913004b1` (2026-08-14, container v2) | 16.96 GiB | `eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e` |
 | Qwen3.8-27B + DFlash2 weights | same repository | `dc370fb6295a` (2026-09-06, container v2) | 19.03 GiB | `0634abb07024221de141456cf04a42ab74b18bc38e1b781c6eb2e062a467eec3` |
+| Qwen3.8-27B **Uncensored** (HauhauCS) | built by this branch from the [HauhauCS Q8_K_P GGUF](https://huggingface.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF); source GGUF `4e7735df...0304bc` (release `SHA256SUMS`) | `b9b9e19d` gguf_to_hf + stock converter, 2026-10-08 | 19.03 GiB | `c58617dd7dc5c171eb90f48dd8e0a1db6d1669bed3dccdf4e431aff014c992b6` |
 
 The download scripts fetch the pinned `3526913004b1` revision, which is the artifact this fork is
 validated with. The artifact is architecture-independent; the model card's RTX 5090 requirement
@@ -428,6 +534,7 @@ JSONL request logs. See [HTTP serving](docs/serving.md) and [CLI usage](docs/cli
 
 ## Upstream and credits
 
+- [HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF](https://huggingface.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF) - the uncensored Qwen3.8-27B tune this branch serves, published GGUF-only; the release ships Ed25519-signed `SHA256SUMS` and provenance files, and the artifact here is built from its `Q8_K_P` quant.
 - [Neroued/ninfer](https://github.com/Neroued/ninfer) - the engine, developed for the RTX 5090
   (`sm_120a`).
 - [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) - the SM86 compatibility layer,
