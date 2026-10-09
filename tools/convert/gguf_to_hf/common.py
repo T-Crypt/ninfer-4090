@@ -63,7 +63,7 @@ def read_architecture(reader: GGUFReader) -> str:
     field = reader.get_field("general.architecture")
     if field is None:
         raise ValueError("GGUF has no general.architecture")
-    return str(field.contents()[0])
+    return str(field.contents())
 
 
 def _fresh_f32(array: np.ndarray) -> np.ndarray:
