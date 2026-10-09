@@ -61,7 +61,7 @@ source in a `PROVENANCE.json` sidecar.
 - [x] 5. Stock converter; `tools.artifact.inspect` matches the current converter's expected counts — **PASS 2026-10-08 (cuda, 181.8 s):** 1190 objects (1184 tensors, 6 resources); BF16 627, FP32 96, I32 1, Q4G64_F16S 183, Q5G64_F16S 246, Q6G64_F16S 1, W8G32_F16S 30. Note: the official artifact on disk (`qwen3_8_27b.ninfer`, built 2026-10-02) is an older build — 1124 objects, BF16 582, W8G32_F16S 9; the current converter emits 66 more tensors and the 46645ada engine consumes them. Provenance sidecar written next to the artifact
 - [x] 6. Perplexity `--quick` within ~5% of the official artifact; refusal prompts answered; tool call and image request pass; MTP acceptance and decode t/s recorded. **PASS 2026-10-08:** PPL 4.4005 vs 4.3446 official (+1.29%, int8 KV, quick corpus); 2 refusal probes answered; `/v1/messages` tool_use structured + vision description correct; decode 131.2 tok/s, MTP acceptance 70.8% (51/72), TTFT 294 ms
 - [x] 7. llama-swap entry `NInfer-HauHauCS-27B` serves through `:9090`, no role aliases (2026-10-08: homelab commit `d266540`, unit env var `NINFER_MODEL_HAUHAUCS`, lsw validate 25 models / 0 problems, cold load 41.5 s, chat completion through `:9090` returns, only `ninfer-serve` holds the card)
-- [ ] 8. Docs and close-out: worktree removed, scratch data deleted
+- [x] 8. Docs and close-out: PR marked ready for review, worktree removed, scratch data deleted (2026-10-08; artifact, PROVENANCE sidecar, conversion report and perplexity profiles are the kept records)
 
 ## Next dense Qwen (Qwen4)
 
