@@ -77,9 +77,17 @@ int main() {
     failures += check(k8v4.kv_cache == ninfer::KvCacheStorage::Fp8KeyNvfp4Value,
                       "--kv-dtype k8v4 did not select asymmetric K8V4 KV");
     const std::string kv_help = serve_usage_text("ninfer-serve");
-    failures += check(kv_help.find("nvfp4") != std::string::npos &&
-                          kv_help.find("k8v4") != std::string::npos,
+    // sm_89 production KV modes; nvfp4/k8v4 still parse but are refused at startup on Ada.
+    failures += check(kv_help.find("rk4v4-e8") != std::string::npos &&
+                          kv_help.find("int8") != std::string::npos,
                       "serve help omits a production KV storage mode");
+    const ServeOptions e8 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "rk4v4-e8"});
+    failures += check(e8.kv_cache == ninfer::KvCacheStorage::RK4V4E8,
+                      "--kv-dtype rk4v4-e8 did not select RK4V4 E8 KV");
+    const ServeOptions vision_cap =
+        parse({"ninfer-serve", "model.ninfer", "--vision-max-tokens", "4096"});
+    failures += check(vision_cap.enable_vision && vision_cap.vision_max_tokens == 4096,
+                      "--vision-max-tokens did not enable Vision with the requested cap");
 
     const ServeOptions model_alias =
         parse({"ninfer-serve", "model.ninfer", "--model-id", "deployment-alias"});

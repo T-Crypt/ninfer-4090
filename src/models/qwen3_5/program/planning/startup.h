@@ -77,6 +77,7 @@ struct SequencePlanningInputs {
     std::uint32_t draft_window              = 0;
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
+    std::uint32_t vision_max_tokens         = 8192;
     ProposalHead proposal_head              = ProposalHead::Full;
     models::LoadOptions features;
     bool use_cuda_graph = true;
@@ -99,6 +100,7 @@ struct SequencePlanImpl {
     std::uint32_t draft_window              = 0;
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
+    std::uint32_t vision_max_tokens         = 8192;
     ProposalHead proposal_head              = ProposalHead::Full;
     models::LoadOptions features;
     bool use_cuda_graph = true;

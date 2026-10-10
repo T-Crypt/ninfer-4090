@@ -47,6 +47,7 @@ struct ServeOptions {
     SpeculativeOptions speculative;
     ContextCacheOptions context_cache;
     bool enable_vision      = false;
+    std::uint32_t vision_max_tokens = 8192;
     bool use_cuda_graph     = true;
     bool allow_prefix_reuse = true;
     std::optional<bool> enable_thinking;

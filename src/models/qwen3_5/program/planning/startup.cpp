@@ -718,8 +718,9 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                   out.dflash_context, out.dflash_round, out.causal_score});
     out.capacity = out.general_capacity;
     if (plan.features.vision) {
-        const std::uint32_t merged = static_cast<std::uint32_t>(
-            std::min<std::uint64_t>(plan.capacity, kMaximumVisionItemTokens));
+        const std::uint32_t merged = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+            std::min<std::uint64_t>(plan.capacity, kMaximumVisionItemTokens),
+            plan.vision_max_tokens));
         out.vision = execution::VisionContext::plan_workspace(
             *parameters.model.config().vision, *parameters.vision, merged, out.general_capacity);
         out.capacity = std::max(out.capacity, out.vision->capacity_bytes);
@@ -801,8 +802,15 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
         }
         break;
     }
-    if (device.compute_capability() != 120) {
-        throw std::invalid_argument("Qwen3.5 family runtime requires compute capability 12.0");
+    if (device.compute_capability() != 89) {
+        throw std::invalid_argument("Qwen3.5 family runtime requires compute capability 8.9");
+    }
+    // NVFP4-valued KV modes need FP4 tensor cores; the sm_89 build carries their kernels only as
+    // throwing stubs (ops/nvfp4_family_disabled.cpp), so refuse them before any allocation.
+    if (options.kv_cache == KvCacheStorage::Nvfp4Group16 ||
+        options.kv_cache == KvCacheStorage::Fp8KeyNvfp4Value) {
+        throw std::invalid_argument(
+            "nvfp4 and k8v4 KV-cache storage require compute capability 12.0");
     }
 }
 
@@ -829,6 +837,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->device              = inputs.device;
     impl->context_cache       = inputs.context_cache;
     impl->kv_storage          = inputs.kv_storage;
+    impl->vision_max_tokens   = inputs.vision_max_tokens;
     impl->persistent          = persistent_layout(*impl);
     impl->workspace           = build_workspace_plan(*impl);
     if (impl->use_cuda_graph) {
@@ -888,6 +897,7 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .draft_window        = options.speculative.draft_tokens,
         .speculative_backend = options.speculative.backend,
         .kv_storage          = options.kv_cache,
+        .vision_max_tokens   = options.vision_max_tokens > 0 ? options.vision_max_tokens : 8192,
         .proposal_head       = options.speculative.proposal_head,
         .features            = models::load_options(options),
         .use_cuda_graph      = options.use_cuda_graph,

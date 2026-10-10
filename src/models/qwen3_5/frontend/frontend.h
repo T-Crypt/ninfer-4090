@@ -21,6 +21,8 @@ struct FrontendOptions {
     std::filesystem::path chat_template_path;
     Architecture architecture              = Architecture::Qwen3_5;
     bool vision_enabled                    = true;
+    // Per-item Vision scratchpad token capacity; zero keeps the registered single-item capacity.
+    std::uint32_t vision_max_tokens        = 0;
     std::uint32_t max_context              = 2'048;
     std::size_t media_cache_bytes          = kDefaultMediaCacheBytes;
     std::size_t media_live_bytes           = kDefaultMediaLiveBytes;
