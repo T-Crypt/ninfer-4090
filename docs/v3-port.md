@@ -307,3 +307,41 @@ one remaining full-gate step, zero code uncertainty attached.
 **Round 3 (stage 3 enabler):** the deferred `src/targets/** → src/models/qwen3_5/**` rewrites
 (29 inventory rows) — the engine glue for KV-mode plumbing, variant/geometry config, MTP3, vision.
 Then stage 3 proper (converter check → v3 artifact → serve at 262K → greedy parity vs `46645ada`).
+
+## Round 3 (2026-10-10): stage-3 enabler landed, artifact ready, GPU gate pending
+
+`port/v3-forward` at `f23bba87` (pushed). Build 291 targets green at `-j 4`; non-model ctest 1-49
+plus the tool-call parser pass. The two model-loading tests (vision workspace, `*_real`) skip without
+`NINFER_TEST_ARTIFACT` and the card.
+
+**Mapping finding: most of the fork's `src/targets/**` delta has a v3 home already or is serve-side.**
+The fork's targets diff (base `d4929686` → tip `8e616981`) is 1,604 added lines, 1,051 of them the slot
+session snapshot (`session_snapshot_impl.h`, stage 4). What the stage-3 serve actually needs:
+
+| Fork change | v3 state |
+|---|---|
+| compute capability gate 12.0 → 8.9, refuse nvfp4/k8v4 KV | **done** in `program/planning/startup.cpp` (`validate_target_options`) |
+| KV storage plumbing for rk4v4-e8 etc. | already generic in v3 (`paged_kv_storage_layout`, ops dispatch merged in stage 2); **added** the dtype strings to `serve_options.cpp` and `apps/cli/options.cpp` |
+| `--vision-max-tokens` per-item cap (`0c3d2bee`, `73b42127`, `328d9aa8`) | **done**: ServeOptions → EngineOptions → FrontendOptions + sequence plan; workspace `merged` capped; aggregate prompt budget unchanged |
+| MTP graph allowance on sm_89 (12/82 MiB) | identical in v3, nothing to carry |
+| `kNativeContext` 262144 → 1048576 | not needed: v3 validates against the artifact's `max_position_embeddings` (262144) |
+| INT8 group-64 prefill policy (`groupwise_policy(phase)`) | **deferred, design change**: v3 reads the activation policy per use from the artifact. The upgraded artifact marks every groupwise weight `A16Only`, so v3 prefills A16. A phase-aware AllowA8 override is a stage-4 item, measured against ticket 3GQSA69 |
+| turn-checkpoint ring | retired in the deploy build (`--turn-checkpoints N (retired)`), not carried |
+| slot save/restore, digests, long anchors, tolerant tool calls, request-line timings | stage 4 (serve-side) |
+
+**Stage-3 artifact: no converter needed.** v3 ships `tools/upgrade_ninfer_v2_to_v3.py`, a
+standard-library, one-time upgrade of the known official v2 inputs that keeps the weight bytes.
+Our production `qwen3_8_27b.ninfer` (1124 objects, groupwise-int) upgraded in 85 s on CPU to
+`~/ninfer-v3-artifacts/qwen3_8_27b.v3.ninfer` (18,210,749,936 bytes, container v3, artifact_id
+`fa43cf1e86624b93ad91559b36c7cbf9`). Formats: bf16 582, fp32 96, q4_g64 183, q5_g64 246, q6_g64 1,
+q8_g32 9, int32 1. No nvfp4 or fp8, so nothing Ada can't run. Proposal head 131072 rows, MTP and Vision present.
+
+**Stage-3 gate (needs the card, so the production 27B unloads for the run):**
+1. `NINFER_TEST_ARTIFACT=~/ninfer-v3-artifacts/qwen3_8_27b.v3.ninfer ctest -R "vision_workspace|loading_real|prefix_real"`
+2. Serve the v3 build with the production flags (`--max-context 262144 --kv-capacity 262144 --kv-dtype rk4v4-e8
+   --spec mtp --draft-tokens 3 --lm-head-draft --vision --preserve-thinking --default-thinking-budget 4096`) and check
+   that it starts and fits in VRAM at 262K.
+3. Greedy fixed-prompt token parity against `deploy/ninfer-serve-46645ada` run with **`NINFER_A16_PREFILL=1`**
+   (v3 prefills A16 on this artifact; the v2 deploy prefills INT8 by default, so a default-flag comparison
+   would diff on prefill numerics, not on the port).
+4. The softmax + q5 full op binaries that need ≥1.5 GiB free (round-2 note) run in the same window.
