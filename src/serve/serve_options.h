@@ -52,6 +52,8 @@ struct ServeOptions {
     bool allow_prefix_reuse = true;
     std::optional<bool> enable_thinking;
     std::optional<bool> preserve_thinking;
+    // Recover complete Qwen tool calls from output the strict parser returns as text.
+    bool tolerant_tool_calls = false;
     std::optional<std::uint32_t> default_thinking_budget;
     int default_max_tokens = kDefaultMaxTokens;
     bool enable_cors       = false; // send permissive CORS headers for browser UIs

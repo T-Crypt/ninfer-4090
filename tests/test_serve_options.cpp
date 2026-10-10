@@ -32,6 +32,8 @@ int main() {
     failures += check(defaults.allow_prefix_reuse, "prefix reuse is not enabled by default");
     failures +=
         check(!defaults.preserve_thinking, "thinking history is unexpectedly preserved by default");
+    failures += check(!defaults.tolerant_tool_calls,
+                      "tolerant tool-call recovery is unexpectedly on by default");
     failures += check(!defaults.enable_vision, "Vision is not disabled by default");
     failures += check(defaults.request_log_jsonl.empty(),
                       "request JSONL logging is not disabled by default");
@@ -165,6 +167,7 @@ int main() {
                                            "--log-stats-interval-ms",
                                            "0",
                                            "--preserve-thinking",
+                                           "--tolerant-tool-calls",
                                            "--media-cache-mib",
                                            "256",
                                            "--media-live-mib",
@@ -179,6 +182,8 @@ int main() {
     failures += check(configured.enable_vision, "--vision did not enable Vision");
     failures += check(configured.preserve_thinking == true,
                       "--preserve-thinking did not reach serving options");
+    failures += check(configured.tolerant_tool_calls,
+                      "--tolerant-tool-calls did not reach serving options");
     failures +=
         check(configured.max_concurrency == 4, "--max-concurrency did not reach serving options");
     failures += check(configured.max_context == 4096 &&
@@ -303,6 +308,9 @@ int main() {
     failures +=
         check(serve_usage_text("ninfer-serve").find("--preserve-thinking") != std::string::npos,
               "serve help omits --preserve-thinking");
+    failures += check(
+        serve_usage_text("ninfer-serve").find("--tolerant-tool-calls") != std::string::npos,
+        "serve help omits --tolerant-tool-calls");
     failures += check(serve_usage_text("ninfer-serve").find("--default-thinking-budget") !=
                           std::string::npos,
                       "serve help omits --default-thinking-budget");
