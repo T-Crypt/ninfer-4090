@@ -9,8 +9,10 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <source_location>
 #include <span>
 #include <stdexcept>
+#include <string>
 
 namespace ninfer::models::qwen3_5::detail {
 
@@ -211,15 +213,28 @@ detail::PhysicalResources checked_resource_sum(detail::PhysicalResources left,
     };
 }
 
+std::string describe_physical_resources(const detail::PhysicalResources& r) {
+    return "lanes " + std::to_string(r.device.active_lanes) + " state_slots " +
+           std::to_string(r.device.state_slots) + " main_kv_pages " +
+           std::to_string(r.device.main_kv_pages) + " backend_kv_pages " +
+           std::to_string(r.device.backend_kv_pages) + " host_state_slots " +
+           std::to_string(r.host.state_slots) + " host_kv_bytes " + std::to_string(r.host.kv_bytes);
+}
+
 detail::PhysicalResources checked_resource_difference(detail::PhysicalResources value,
-                                                      detail::PhysicalResources removed) {
+                                                      detail::PhysicalResources removed,
+                                                      std::source_location site) {
     if (removed.device.active_lanes > value.device.active_lanes ||
         removed.device.state_slots > value.device.state_slots ||
         removed.device.main_kv_pages > value.device.main_kv_pages ||
         removed.device.backend_kv_pages > value.device.backend_kv_pages ||
         removed.host.state_slots > value.host.state_slots ||
         removed.host.kv_bytes > value.host.kv_bytes) {
-        throw std::logic_error("Qwen3.5 resource subtraction underflow");
+        // Name the call site and both operands: the bare message made issue #9 undiagnosable.
+        throw std::logic_error(
+            "Qwen3.5 resource subtraction underflow at " + std::string(site.function_name()) + ":" +
+            std::to_string(site.line()) + " (value: " + describe_physical_resources(value) +
+            "; removed: " + describe_physical_resources(removed) + ")");
     }
     return detail::PhysicalResources{
         .device =

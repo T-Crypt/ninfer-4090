@@ -4,6 +4,14 @@ add_executable(ninfer_public_api_test "${CMAKE_CURRENT_LIST_DIR}/../test_public_
 target_include_directories(ninfer_public_api_test PRIVATE ${PROJECT_SOURCE_DIR}/include)
 add_test(NAME ninfer_public_api_test COMMAND ninfer_public_api_test)
 
+# Exercises the two-limb u128 shim (NINFER_FORCE_PORTABLE_U128) against native
+# unsigned __int128, which only GCC/Clang provide, hence the Linux guard.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  ninfer_add_test(ninfer_portable_u128_test
+    SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_portable_u128.cpp")
+  target_compile_definitions(ninfer_portable_u128_test PRIVATE NINFER_FORCE_PORTABLE_U128)
+endif()
+
 ninfer_add_test(ninfer_device_test       SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_device.cpp"
   LIBRARIES ninfer_core)
 

@@ -56,7 +56,8 @@ std::string usage_text() {
     return "usage: ninfer-perplexity <model.ninfer> "
            "(--corpus <manifest.json> [--quick] | --text <utf8-file>)\n"
            "       [--context N] [--stride N] [--device N]\n"
-           "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8] [--output <directory>]\n"
+           "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8] [--output "
+           "<directory>]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n";
 }
 
@@ -180,7 +181,11 @@ std::string safe_component(std::string_view value) {
 std::string timestamp() {
     const std::time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     std::tm utc{};
+#ifdef _WIN32
+    (void)::gmtime_s(&utc, &now);
+#else
     gmtime_r(&now, &utc);
+#endif
     std::ostringstream out;
     out << std::put_time(&utc, "%Y%m%d-%H%M%S");
     return out.str();
