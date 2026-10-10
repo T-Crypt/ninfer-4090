@@ -415,23 +415,10 @@ void causal_attention_small_t_launch(
     const Tensor& valid_columns, const Tensor& table_rows, float scale, PagedKVBatchLayerView cache,
     CausalAttentionExecutionEnvelope envelope, std::int32_t column_begin, std::int32_t width,
     Tensor& partial_acc, Tensor& partial_m, Tensor& partial_l, Tensor& out, cudaStream_t stream) {
-    if (cache.storage == KvCacheStorage::Fp8KeyNvfp4Value) {
-        causal_attention_small_t_k8v4_launch(q, k, v, pos, valid_columns, table_rows, scale, cache,
-                                             envelope, column_begin, width, partial_acc, partial_m,
-                                             partial_l, out, stream);
-        return;
-    }
-    if (cache.storage == KvCacheStorage::Fp8E4M3Row256) {
-        causal_attention_small_t_fp8_launch(q, k, v, pos, valid_columns, table_rows, scale, cache,
-                                            envelope, column_begin, width, partial_acc, partial_m,
-                                            partial_l, out, stream);
-        return;
-    }
-    if (cache.storage == KvCacheStorage::Nvfp4Group16) {
-        causal_attention_small_t_nvfp4_launch(q, k, v, pos, valid_columns, table_rows, scale, cache,
-                                              envelope, column_begin, width, partial_acc, partial_m,
-                                              partial_l, out, stream);
-        return;
+    // v3 port: upstream storages run their own families in causal_softmax_attention.cpp; this
+    // generic launcher serves BF16 and the int8 family (fork rotated/packed/E8 storages) only.
+    if (cache.storage != KvCacheStorage::BFloat16 && !kv_storage_is_int8_family(cache.storage)) {
+        throw std::invalid_argument("causal_attention_small_t_launch: storage is not served by the generic launcher");
     }
     const CausalAppendInput input{static_cast<const __nv_bfloat16*>(k.data),
                                   static_cast<const __nv_bfloat16*>(v.data)};
@@ -459,20 +446,10 @@ void causal_attention_cached_small_t_launch(const Tensor& q, const Tensor& pos, 
                                             CausalAttentionExecutionEnvelope envelope,
                                             Tensor& partial_acc, Tensor& partial_m,
                                             Tensor& partial_l, Tensor& out, cudaStream_t stream) {
-    if (cache.storage == KvCacheStorage::Fp8KeyNvfp4Value) {
-        causal_attention_cached_small_t_k8v4_launch(q, pos, scale, cache, envelope, partial_acc,
-                                                    partial_m, partial_l, out, stream);
-        return;
-    }
-    if (cache.storage == KvCacheStorage::Fp8E4M3Row256) {
-        causal_attention_cached_small_t_fp8_launch(q, pos, scale, cache, envelope, partial_acc,
-                                                   partial_m, partial_l, out, stream);
-        return;
-    }
-    if (cache.storage == KvCacheStorage::Nvfp4Group16) {
-        causal_attention_cached_small_t_nvfp4_launch(q, pos, scale, cache, envelope, partial_acc,
-                                                     partial_m, partial_l, out, stream);
-        return;
+    // v3 port: upstream storages run their own families in causal_softmax_attention.cpp; this
+    // generic launcher serves BF16 and the int8 family (fork rotated/packed/E8 storages) only.
+    if (cache.storage != KvCacheStorage::BFloat16 && !kv_storage_is_int8_family(cache.storage)) {
+        throw std::invalid_argument("causal_attention_cached_small_t_launch: storage is not served by the generic launcher");
     }
     const CausalCachedInput input{};
     const CausalSmallTInvocation invocation{

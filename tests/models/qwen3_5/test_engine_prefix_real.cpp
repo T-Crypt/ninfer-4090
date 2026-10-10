@@ -231,7 +231,9 @@ ninfer::PromptInput chinese_chat(bool enable_thinking) {
 }
 
 int exercise_registered_frontend(const ninfer::Engine& engine) {
-    if (engine.count_tokens(chinese_chat(true)) != 16) {
+    // 16 on Qwen3.6; Qwen3.8's template adds the default xhigh reasoning instruction (58).
+    const std::size_t thinking_tokens = engine.count_tokens(chinese_chat(true));
+    if (thinking_tokens != 16 && thinking_tokens != 58) {
         std::cerr << "registered tokenizer/chat template changed the thinking prompt golden\n";
         return 1;
     }
