@@ -345,3 +345,25 @@ q8_g32 9, int32 1. No nvfp4 or fp8, so nothing Ada can't run. Proposal head 1310
    (v3 prefills A16 on this artifact; the v2 deploy prefills INT8 by default, so a default-flag comparison
    would diff on prefill numerics, not on the port).
 4. The softmax + q5 full op binaries that need ≥1.5 GiB free (round-2 note) run in the same window.
+
+## Stage 3 gate (2026-10-10, later): green; draft upstream PR opened
+
+`port/v3-forward` at `72a24f46`. The first serve attempt died at target finalization: the merged
+`causal_softmax_attention.cpp` sent the fork storages (rk8v4/rk4v4/rk4v4-e8/rk2v4-e8) to the k8v4 family
+(the nvfp4 stub on sm_89) for workspace sizing, append and cached attention. Fix: route them through the
+fork's generic `small_t.cu`/`prompt.cu` launchers (now in the build) as the fork tip did; their unreachable
+fp8/nvfp4/k8v4 branches got a guard instead.
+
+| Check | Result |
+|---|---|
+| serve, production flags, 262K rk4v4-e8 + MTP3 + lm-head-draft + vision | up in 42.6 s, 23,106 MiB (v2 23,110), runtime 5.31 GiB, 1.01 GiB free |
+| perplexity full 1M corpus, int8 KV, 4096/2048 | v3 4.651043 vs v2 A16 4.651185 (-0.003%) |
+| perplexity quick, v3 | rk4v4-e8 4.3624, int8 4.3430 |
+| greedy chat x4 vs v2 (A16 prefill, rk4v4-e8) | identical prompt tokens; outputs match to a near-tie at 40-200 tokens |
+| `vision_workspace`, `score_real` | pass |
+| `prefix_real` | golden widened for Qwen3.8 (58 thinking-prompt tokens); then fails the host-restore scenario (device copy survives pressure, `degraded=1`). Open |
+
+Raw data: homelab `state/evals/2026-10-10/v3-parity/`. Draft PR for sergiuszm's review:
+https://github.com/sergiuszm/ninfer-4090/pull/16 (do not mark ready until he reviews; stage 4-6 open).
+Not carried yet: rtx4090-port commits after `8e616981` (`cb2df08a` MSVC, `b8c71f00` portable_u128,
+`49deb207` #9 entitlement fix, 2 docs).
