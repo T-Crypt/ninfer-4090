@@ -1,6 +1,7 @@
 #include "ninfer/engine.h"
 #include "kv_cache_storage.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -1100,6 +1101,122 @@ int exercise_private_long_anchor_capture_and_replacement(const char* artifact) {
     return 0;
 }
 
+// Engine-automatic private long anchors, and their bound. The production failure was that no
+// HTTP request can place a PrivateLongAnchor marker, so long_anchors was always empty and a
+// rewrite below the rewrite checkpoint had no reuse candidate (path=root, full re-prefill).
+// ContextCacheHints::automatic_private_anchors makes the Frontend propose anchors itself. But
+// retention still evicts the SHALLOWEST anchor when the set is full, so coverage reaches back
+// exactly max_long_anchors_per_continuation message boundaries and no further: a shallow tail
+// rewrite reuses, a rewrite deeper than the cap still falls to root, and raising the cap (and
+// the automatic count with it) is what extends the reach. This exercise asserts all three.
+int automatic_anchor_case(const char* artifact, std::uint32_t cap, std::uint32_t rewrite_index,
+                          ninfer::PrefixReusePath expected, const char* label) {
+    ninfer::EngineOptions options = private_long_anchor_engine_options(artifact);
+    options.max_context                                     = 1024;
+    options.kv_capacity =
+        ninfer::KvCapacityPolicy::explicit_capacity(1024);
+    options.context_cache.max_long_anchors_per_continuation = cap;
+    options.context_cache.max_private_continuations         = 2;
+    // One continuation may hold endpoint + rewrite + cap anchors; the active lane needs its own.
+    options.context_cache.device_state_slots = 4U + 2U * cap;
+    options.context_cache.host_state_slots   = 4U + 2U * cap;
+    ninfer::Engine engine(std::move(options));
+
+    // Six short user messages. Automatic anchors land at the boundaries after messages 1..5;
+    // the count equals the cap, so cap=2 retains the two deepest (after messages 4 and 5) and
+    // cap=5 retains every interior boundary. Message index `rewrite_index` is changed in the
+    // second request; message index i diverges at the boundary after i messages, which cap
+    // covers only when cap >= 6 - i.
+    const auto messages = [](std::uint32_t rewrite_index) {
+        std::vector<std::string> turns = {
+            "Stable shared opening that every later request keeps verbatim.",
+            "First follow-up message in the conversation body.",
+            "Second follow-up message in the conversation body.",
+            "Third follow-up message in the conversation body.",
+            "Fourth follow-up message in the conversation body.",
+            "Fifth and final follow-up message in the conversation body."};
+        if (rewrite_index != 0 && rewrite_index < turns.size()) {
+            turns[rewrite_index] = "A rewritten message that diverges from the retained history.";
+        }
+        return turns;
+    };
+    const auto prompt = [&](std::uint32_t rewrite_index, std::uint32_t anchors) {
+        ninfer::PromptInput input;
+        for (std::string& text : messages(rewrite_index)) {
+            ninfer::ChatMessage message;
+            message.role = ninfer::ChatRole::User;
+            message.parts.push_back(ninfer::MessagePart{
+                .kind = ninfer::MessagePartKind::Text, .text = std::move(text), .media = {}});
+            input.messages.push_back(std::move(message));
+        }
+        input.options.enable_thinking                 = false;
+        input.context_cache.automatic_private_anchors = anchors;
+        return input;
+    };
+    ninfer::RequestOptions request;
+    request.execution.requested_output_tokens = 1;
+    request.execution.sampling.temperature    = 0.0F;
+    request.execution.allow_prefix_reuse      = true;
+    request.stop.include_model_defaults       = false;
+
+    // Establish the continuation from Root, with anchors at the last `cap` boundaries.
+    const ninfer::GenerationResult source =
+        engine.generate(engine.prepare(prompt(0, cap)), request);
+    if (source.generated_token_ids.size() != 1 ||
+        source.prefix_reuse_path != ninfer::PrefixReusePath::Root) {
+        std::cerr << label << ": source did not complete from Root (path="
+                  << static_cast<int>(source.prefix_reuse_path) << ")\n";
+        return 1;
+    }
+
+    const ninfer::GenerationResult rewritten =
+        engine.generate(engine.prepare(prompt(rewrite_index, cap)), request);
+    if (rewritten.generated_token_ids.size() != 1 || rewritten.prefix_reuse_path != expected) {
+        const ninfer::RuntimeStats stats = engine.runtime_stats();
+        std::cerr << label << ": expected path " << static_cast<int>(expected) << ", got "
+                  << static_cast<int>(rewritten.prefix_reuse_path)
+                  << " (reused=" << rewritten.reused_prompt_tokens
+                  << " prompt=" << rewritten.prompt.prompt_tokens
+                  << " captures=" << stats.active_captures_completed << ")\n";
+        return 1;
+    }
+    if (expected == ninfer::PrefixReusePath::PrivateLongAnchor &&
+        (rewritten.reused_prompt_tokens == 0 ||
+         rewritten.reused_prompt_tokens >= rewritten.prompt.prompt_tokens)) {
+        std::cerr << label << ": anchor reuse was empty or total (reused="
+                  << rewritten.reused_prompt_tokens << " prompt=" << rewritten.prompt.prompt_tokens
+                  << ")\n";
+        return 1;
+    }
+    return 0;
+}
+
+int exercise_automatic_private_anchors(const char* artifact) {
+    // Shallow rewrite (message 4 of 6) at the default cap of 2: covered, restores at an anchor.
+    if (const int r = automatic_anchor_case(artifact, 2, 4,
+                                            ninfer::PrefixReusePath::PrivateLongAnchor,
+                                            "cap=2 shallow rewrite");
+        r != 0) {
+        return r;
+    }
+    // Deep rewrite (message 1 of 6) at cap 2: beyond the two retained tail anchors, so it falls
+    // to Root. This is the honest bound - the automatic anchors do not cover arbitrary depth.
+    if (const int r = automatic_anchor_case(artifact, 2, 1, ninfer::PrefixReusePath::Root,
+                                            "cap=2 deep rewrite");
+        r != 0) {
+        return r;
+    }
+    // The same deep rewrite with the cap (and the automatic count) raised to 5 retains every
+    // interior boundary, so the anchor below the edit survives and reuse is restored.
+    if (const int r = automatic_anchor_case(artifact, 5, 1,
+                                            ninfer::PrefixReusePath::PrivateLongAnchor,
+                                            "cap=5 deep rewrite");
+        r != 0) {
+        return r;
+    }
+    return 0;
+}
+
 int exercise_last_private_alias_eviction(const char* artifact) {
     ninfer::Engine engine(last_alias_engine_options(artifact));
     std::string prompt_text;
@@ -2115,6 +2232,9 @@ int exercise_artifact(const char* artifact) {
         result != 0) {
         return result;
     }
+    if (const int result = exercise_automatic_private_anchors(artifact); result != 0) {
+        return result;
+    }
     if (const int result = exercise_last_private_alias_eviction(artifact); result != 0) {
         return result;
     }
@@ -2270,6 +2390,8 @@ int main() {
         result = exercise_shared_replacement_and_full_capacity_reuse(artifact);
     } else if (scenario == "private-long-anchor") {
         result = exercise_private_long_anchor_capture_and_replacement(artifact);
+    } else if (scenario == "automatic-private-anchors") {
+        result = exercise_automatic_private_anchors(artifact);
     } else if (scenario == "rewrite-checkpoint-shared") {
         ninfer::Engine engine(shared_replacement_engine_options(artifact));
         result = exercise_rewrite_checkpoints(engine, RewriteCheckpointCacheTopology::SharedAlias);

@@ -1345,6 +1345,108 @@ int test_image_resize_rejection_policy() {
     return failures;
 }
 
+// Engine-automatic private long anchors: ContextCacheHints::automatic_private_anchors = N must
+// yield PrivateLongAnchor opportunities at the boundaries after the last N messages, excluding
+// the boundary after the final message, without counting against the explicit marker limit
+// and without duplicating an explicit anchor at the same frontier.
+int test_automatic_private_anchor_opportunities() {
+    int failures               = 0;
+    const Frontend frontend    = make_frontend(resources(), false);
+
+    const auto text_message = [](ninfer::ChatRole role, const char* text) {
+        ninfer::ChatMessage message;
+        message.role = role;
+        message.parts.push_back(
+            ninfer::MessagePart{.kind = ninfer::MessagePartKind::Text, .text = text, .media = {}});
+        return message;
+    };
+    const auto conversation = [&]() {
+        ninfer::PromptInput input;
+        input.messages.push_back(text_message(ninfer::ChatRole::System, "system preamble"));
+        input.messages.push_back(text_message(ninfer::ChatRole::User, "first question"));
+        input.messages.push_back(text_message(ninfer::ChatRole::Assistant, "first answer"));
+        input.messages.push_back(text_message(ninfer::ChatRole::User, "second question"));
+        input.options.enable_thinking = false;
+        return input;
+    };
+    const auto anchors = [](const auto& data) {
+        std::vector<std::uint32_t> frontiers;
+        for (const auto& opportunity : data.context_cache.opportunities) {
+            if (opportunity.kind == ninfer::PromptCacheMarkerKind::PrivateLongAnchor) {
+                frontiers.push_back(opportunity.frontier);
+            }
+        }
+        std::sort(frontiers.begin(), frontiers.end());
+        return frontiers;
+    };
+
+    // Default: no automatic anchors, so none appear (upstream behavior).
+    {
+        const auto prepared = frontend.prepare(conversation());
+        failures += check(anchors(FrontendFactory::inspect(prepared)).empty(),
+                          "automatic private anchors appeared without being requested");
+    }
+
+    // N = 2 on four messages: the boundaries after message 3 and message 2, nothing at the
+    // prompt end, and both strictly inside the token ledger below the rewrite checkpoint.
+    std::vector<std::uint32_t> two;
+    {
+        ninfer::PromptInput input                     = conversation();
+        input.context_cache.automatic_private_anchors = 2;
+        const auto prepared                           = frontend.prepare(std::move(input));
+        const auto& data                              = FrontendFactory::inspect(prepared);
+        two                                           = anchors(data);
+        const bool inside = std::all_of(two.begin(), two.end(), [&](std::uint32_t frontier) {
+            return frontier != 0 && frontier < data.token_ids.size() &&
+                   (!data.identity.rewrite_checkpoint ||
+                    frontier < data.identity.rewrite_checkpoint->frontier);
+        });
+        failures += check(two.size() == 2 && two[0] < two[1] && inside,
+                          "automatic_private_anchors=2 did not yield two distinct anchors below "
+                          "the rewrite checkpoint");
+    }
+
+    // N above the message count proposes every interior boundary (after messages 1..3) and
+    // stops there: the preamble boundary and the final boundary are never anchors.
+    {
+        ninfer::PromptInput input                     = conversation();
+        input.context_cache.automatic_private_anchors = 10;
+        const auto prepared                           = frontend.prepare(std::move(input));
+        const auto all                                = anchors(FrontendFactory::inspect(prepared));
+        failures += check(all.size() == 3 && all[1] == two[0] && all[2] == two[1],
+                          "automatic_private_anchors above the message count did not stop at the "
+                          "interior boundaries");
+    }
+
+    // An explicit PrivateLongAnchor marker at an automatic frontier merges instead of
+    // duplicating, and automatic anchors do not count toward the four-marker limit.
+    {
+        ninfer::PromptInput input                     = conversation();
+        input.context_cache.automatic_private_anchors = 2;
+        input.context_cache.markers.push_back(ninfer::PromptCacheMarker{
+            .after_message_count = 3,
+            .kind                = ninfer::PromptCacheMarkerKind::PrivateLongAnchor,
+            .location            = ninfer::PromptCacheMarkerLocation::MessageBoundary,
+        });
+        const auto prepared = frontend.prepare(std::move(input));
+        const auto merged   = anchors(FrontendFactory::inspect(prepared));
+        failures += check(merged == two,
+                          "an explicit anchor at an automatic frontier was duplicated or lost");
+    }
+
+    // A single message has no interior boundary: nothing to anchor.
+    {
+        ninfer::PromptInput input;
+        input.messages.push_back(text_message(ninfer::ChatRole::User, "alone"));
+        input.options.enable_thinking                 = false;
+        input.context_cache.automatic_private_anchors = 4;
+        const auto prepared                           = frontend.prepare(std::move(input));
+        failures += check(anchors(FrontendFactory::inspect(prepared)).empty(),
+                          "a one-message prompt produced an automatic anchor");
+    }
+    return failures;
+}
+
 int test_explicit_leading_instruction_cache_boundary() {
     const Frontend frontend           = make_frontend(resources(), false);
     constexpr std::string_view stable = "stable cache section.";
@@ -2183,6 +2285,7 @@ int main() {
     failures += test_template_media_contract();
     failures += test_image_resize_rejection_policy();
     failures += test_explicit_leading_instruction_cache_boundary();
+    failures += test_automatic_private_anchor_opportunities();
     failures += test_media_admission_uses_aggregate_resources(frontend);
     failures += test_multimodal_prompt_over_removed_32k_cap(frontend);
     failures += test_attention_pairs_are_diagnostic(frontend);

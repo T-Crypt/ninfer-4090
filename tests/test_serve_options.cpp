@@ -69,6 +69,44 @@ int main() {
     failures += check(resolve_public_model_id(defaults, "artifact-model") == "artifact-model",
                       "artifact model id was not selected by default");
 
+    // --auto-long-anchors: unset by default so it can follow the resolved anchor cap.
+    failures += check(!defaults.auto_long_anchors.has_value(),
+                      "--auto-long-anchors is not left to the anchor cap by default");
+    const ServeOptions anchors =
+        parse({"ninfer-serve", "model.ninfer", "--auto-long-anchors", "3"});
+    failures += check(anchors.auto_long_anchors == 3U, "--auto-long-anchors was not applied");
+    bool missing_anchor_value_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--auto-long-anchors"});
+    } catch (const std::invalid_argument&) { missing_anchor_value_rejected = true; }
+    failures += check(missing_anchor_value_rejected, "--auto-long-anchors accepted no value");
+    {
+        ninfer::ContextCacheOptions resolved;
+        resolved.enabled                           = true;
+        resolved.max_long_anchors_per_continuation = 2;
+        failures += check(resolve_automatic_private_anchors(defaults, resolved) == 2U,
+                          "unset --auto-long-anchors does not follow the resolved anchor cap");
+        failures += check(resolve_automatic_private_anchors(anchors, resolved) == 2U,
+                          "--auto-long-anchors above the anchor cap was not clamped to it");
+        const ServeOptions none =
+            parse({"ninfer-serve", "model.ninfer", "--auto-long-anchors", "0"});
+        failures += check(resolve_automatic_private_anchors(none, resolved) == 0U,
+                          "--auto-long-anchors 0 did not disable automatic anchors");
+        const ServeOptions one =
+            parse({"ninfer-serve", "model.ninfer", "--auto-long-anchors", "1"});
+        failures += check(resolve_automatic_private_anchors(one, resolved) == 1U,
+                          "--auto-long-anchors below the cap was not honored");
+        ninfer::ContextCacheOptions disabled;
+        disabled.enabled = false;
+        failures += check(resolve_automatic_private_anchors(defaults, disabled) == 0U,
+                          "a disabled context cache still proposes automatic anchors");
+        const ServeOptions no_reuse =
+            parse({"ninfer-serve", "model.ninfer", "--no-prefix-reuse"});
+        failures += check(no_reuse.auto_long_anchors == 0U &&
+                              resolve_automatic_private_anchors(no_reuse, resolved) == 0U,
+                          "--no-prefix-reuse did not disable automatic anchors");
+    }
+
     const ServeOptions fp8 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "fp8"});
     failures += check(fp8.kv_cache == ninfer::KvCacheStorage::Fp8E4M3Row256,
                       "--kv-dtype fp8 did not select row-scaled E4M3 KV");

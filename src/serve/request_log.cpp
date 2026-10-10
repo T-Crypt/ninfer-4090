@@ -501,7 +501,9 @@ std::string format_server_start_json(
                    {"max_private_continuations", cache.max_private_continuations.value()},
                    {"max_shared_prefixes", cache.max_shared_prefixes.value()},
                    {"max_long_anchors_per_continuation",
-                    cache.max_long_anchors_per_continuation.value()}}}};
+                    cache.max_long_anchors_per_continuation.value()},
+                   {"automatic_private_anchors",
+                    resolve_automatic_private_anchors(options, cache)}}}};
     record["sampling_defaults"] =
         Json{{"thinking", preset_json(sampling_defaults.thinking)},
              {"non_thinking", preset_json(sampling_defaults.non_thinking)},

@@ -253,7 +253,9 @@ GenerationService::GenerationService(ServeOptions options, StartupObserver start
     engine_options.media_live_bytes         = options_.media_live_bytes;
     engine_options.media_preprocess_threads = options_.media_preprocess_threads;
     engine_options.startup_observer         = std::move(startup_observer);
-    engine_           = std::make_unique<ninfer::Engine>(std::move(engine_options));
+    engine_ = std::make_unique<ninfer::Engine>(std::move(engine_options));
+    automatic_private_anchors_ =
+        resolve_automatic_private_anchors(options_, engine_->options().context_cache);
     request_capacity_ = std::make_shared<RequestCapacity>(
         static_cast<std::size_t>(options_.max_concurrency) + options_.max_pending_requests);
 }
@@ -333,6 +335,11 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
         input.context_cache.allow_engine_automatic_shared_prefixes =
             input.context_cache.allow_engine_automatic_shared_prefixes &&
             protocol_allows_engine_automatic;
+        // Server policy, not protocol: every prompt gets the same trailing-boundary anchors
+        // whichever endpoint it came through. Zero when reuse is off (prepare_impl then also
+        // clears allow_prefix_reuse, so the Frontend ignores the hint either way).
+        input.context_cache.automatic_private_anchors =
+            cache_participation == CacheParticipation::ReadWrite ? automatic_private_anchors_ : 0U;
         prepared.acquisition_seconds =
             std::chrono::duration<double>(Clock::now() - acquisition_started).count();
         check_preparation_control(prepared.lifetime->deadline, is_cancelled);

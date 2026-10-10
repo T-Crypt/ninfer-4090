@@ -46,6 +46,11 @@ struct ServeOptions {
     KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
     ContextCacheOptions context_cache;
+    // --auto-long-anchors N: propose a private long anchor at each of the last N message
+    // boundaries of every prompt. Unset resolves to the retained-anchor cap
+    // (--max-long-anchors-per-continuation) once the Engine has normalized it; 0 disables.
+    // See resolve_automatic_private_anchors.
+    std::optional<std::uint32_t> auto_long_anchors;
     bool enable_vision      = false;
     std::uint32_t vision_max_tokens = 8192;
     bool use_cuda_graph     = true;
@@ -69,6 +74,14 @@ struct ServeOptions {
 };
 
 ServeOptions parse_serve_options(int argc, char** argv);
+
+// The per-request ContextCacheHints::automatic_private_anchors value for this server: the
+// explicit --auto-long-anchors when given, else the resolved anchor cap, and never more than
+// that cap (extra proposals would only churn replacements within one prefill). Zero when the
+// context cache is disabled. `resolved` must be the Engine's normalized options, not the parsed
+// ServeOptions::context_cache, whose optionals are still unset.
+std::uint32_t resolve_automatic_private_anchors(const ServeOptions& options,
+                                                const ContextCacheOptions& resolved);
 std::string resolve_public_model_id(const ServeOptions& options,
                                     std::string_view artifact_model_name);
 std::string serve_usage_text(const char* argv0);
