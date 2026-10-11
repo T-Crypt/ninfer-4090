@@ -42,6 +42,7 @@ struct PersistentLayout {
     std::optional<TensorLayout> score_hidden;
     std::optional<TensorLayout> token_counts;
     std::optional<TensorLayout> sampling_config;
+    std::optional<TensorLayout> grammar_masks;
     std::size_t bytes            = 0;
     std::size_t kv_payload_bytes = 0;
 };
@@ -80,15 +81,12 @@ struct SequencePlanningInputs {
     std::uint32_t vision_max_tokens         = 8192;
     ProposalHead proposal_head              = ProposalHead::Full;
     models::LoadOptions features;
-    bool use_cuda_graph = true;
-    bool causal_scoring = false;
-    int device          = 0;
+    bool use_cuda_graph               = true;
+    bool causal_scoring               = false;
+    int device                        = 0;
+    std::int32_t multiprocessor_count = 0;
     ContextCacheOptions context_cache;
 };
-
-} // namespace ninfer::models::qwen3_5::detail
-
-namespace ninfer::models::qwen3_5::detail {
 
 struct SequencePlanImpl {
     const execution::Parameters* parameters = nullptr;
@@ -103,9 +101,10 @@ struct SequencePlanImpl {
     std::uint32_t vision_max_tokens         = 8192;
     ProposalHead proposal_head              = ProposalHead::Full;
     models::LoadOptions features;
-    bool use_cuda_graph = true;
-    bool causal_scoring = false;
-    int device          = 0;
+    bool use_cuda_graph               = true;
+    bool causal_scoring               = false;
+    int device                        = 0;
+    std::int32_t multiprocessor_count = 0;
     ContextCacheOptions context_cache;
     PersistentLayout persistent;
     WorkspacePlan workspace;
@@ -118,11 +117,6 @@ struct SequencePlannerImpl {
     runtime::SequenceCapacityCurve curve;
     std::unique_ptr<SequencePlanImpl> minimum;
 };
-
-} // namespace ninfer::models::qwen3_5::detail
-
-namespace ninfer::models::qwen3_5::detail {
-
 
 [[nodiscard]] std::unique_ptr<qwen3_5::detail::SequencePlannerImpl>
 make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContext& device,

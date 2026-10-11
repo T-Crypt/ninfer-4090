@@ -29,6 +29,11 @@ namespace ninfer::ops::detail {
 // thread's memory latency rather than a single bulk copy). Correctness first;
 // the lost transport depth is accepted for now.
 // ---------------------------------------------------------------------------
+//
+// Upstream's predicated schedules (partial final row tile, K tail; TMA zero-fills both) are
+// served the same way here: rows at or past `rows` and K chunks at or past K are zero-filled.
+// K is validated to a multiple of 8, so 16-byte chunks predicate exactly.
+// ---------------------------------------------------------------------------
 
 // Stage rows (A rows first, then B rows) are spread across the producer
 // threads as contiguous runs; thread pid copies its run for each stage.
@@ -36,22 +41,23 @@ template <class Schedule>
 __device__ __forceinline__ void bf16_cp_stage_rows(const __nv_bfloat16* weight,
                                                    const __nv_bfloat16* x,
                                                    __nv_bfloat16* a, __nv_bfloat16* b,
-                                                   int stage, int kt, int k, int row_begin,
-                                                   int token_begin, int token_end, int pid) {
+                                                   int stage, int kt, int k, int rows,
+                                                   int row_begin, int token_begin, int token_end,
+                                                   int pid) {
     constexpr int BR = Schedule::kBlockRows, BT = Schedule::kBlockTokens, BK = Schedule::kBlockK;
     constexpr int P  = Schedule::kProducerThreads;
     constexpr int rows_per = (BR + BT + P - 1) / P;
     const int first  = pid * rows_per, last = min(first + rows_per, BR + BT);
-    auto copy_row = [&](int row, int global_row, const __nv_bfloat16* base,
-                        __nv_bfloat16* stage_base, bool zfill_oob) {
-        // Only the activation (token) rows can be out of range; A rows are complete
-        // (rows % kBlockRows == 0 is validated), so they never zfill.
-        const bool zfill = zfill_oob && global_row >= token_end;
+    auto copy_row = [&](int row, int global_row, int row_end, const __nv_bfloat16* base,
+                        __nv_bfloat16* stage_base) {
+        const bool row_oob = global_row >= row_end;
 #pragma unroll
         for (int chunk = 0; chunk < BK / 8; ++chunk) {
             // 16-byte chunks land on the TMA 128B-swizzle positions the consumers read.
+            const int column = kt * BK + chunk * 8;
+            const bool zfill = row_oob || (bf16_predicated_k<Schedule> && column >= k);
             const __nv_bfloat16* src =
-                base + static_cast<std::size_t>(global_row) * k + kt * BK + chunk * 8;
+                zfill ? base : base + static_cast<std::size_t>(global_row) * k + column;
             __nv_bfloat16* dst =
                 stage_base + row * BK + bf16_mma_shared_col<Schedule>(row, chunk * 8);
             if (zfill) {
@@ -62,9 +68,9 @@ __device__ __forceinline__ void bf16_cp_stage_rows(const __nv_bfloat16* weight,
         }
     };
     for (int r = first; r < min(last, BR); ++r)
-        copy_row(r, row_begin + r, weight, a + stage * BR * BK, false);
+        copy_row(r, row_begin + r, rows, weight, a + stage * BR * BK);
     for (int r = max(first, BR); r < last; ++r)
-        copy_row(r - BR, token_begin + r - BR, x, b + stage * BT * BK, true);
+        copy_row(r - BR, token_begin + r - BR, token_end, x, b + stage * BT * BK);
 }
 
 template <class Schedule, class Epilogue>
@@ -82,7 +88,8 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void bf16_a16_t
     constexpr int BR = Schedule::kBlockRows, BT = Schedule::kBlockTokens, BK = Schedule::kBlockK;
     constexpr int S   = Schedule::kStages;
     const int K       = Schedule::kStaticK ? Schedule::kStaticK : input_rows;
-    const int tiles_r = rows / BR, tiles_t = (count + BT - 1) / BT;
+    const int tiles_r = bf16_predicated_rows<Schedule> ? (rows + BR - 1) / BR : rows / BR;
+    const int tiles_t = (count + BT - 1) / BT;
     int tile_r, tile_t;
     bf16_mma_tile_coordinates<Schedule>(blockIdx.x, tiles_r, tiles_t, tile_r, tile_t);
     const int row_begin = tile_r * BR, token_begin = token_offset + tile_t * BT;
@@ -101,13 +108,13 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void bf16_a16_t
         cta_mbarrier_fence_init();
     }
     __syncthreads();
-    const int tiles_k = K / BK;
+    const int tiles_k = K / BK + (bf16_predicated_k<Schedule> && K % BK != 0);
     if (threadIdx.x < Schedule::kProducerThreads) {
         for (int kt = 0; kt < tiles_k; ++kt) {
             const int stage = kt % S;
             cta_mbarrier_wait(empty + stage, 1U ^ ((kt / S) & 1U));
-            bf16_cp_stage_rows<Schedule>(weight, x, a, b, stage, kt, K, row_begin, token_begin,
-                                         token_offset + count, threadIdx.x);
+            bf16_cp_stage_rows<Schedule>(weight, x, a, b, stage, kt, K, rows, row_begin,
+                                         token_begin, token_offset + count, threadIdx.x);
             cp_commit();
             // Per-thread cp.async completion: this thread's group must be done before it
             // signals the stage, so every producer arrival is backed by real data.
@@ -119,6 +126,7 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void bf16_a16_t
     const int tid  = threadIdx.x - Schedule::kProducerThreads;
     const int warp = tid / 32, lane = tid & 31;
     float accum[Schedule::kMmaRows][Schedule::kMmaTokens][4] = {};
+#pragma unroll Schedule::kConsumerKUnroll
     for (int kt = 0; kt < tiles_k; ++kt) {
         const int stage = kt % S;
         cta_mbarrier_wait(full + stage, (kt / S) & 1U);
@@ -142,10 +150,13 @@ void launch_bf16_a16_tma_mma(const Bf16A16Operands& p, Output output, Epilogue e
     // TMA descriptors are gone on sm_89; the kernel takes raw pointers, so the
     // launcher owns the validation make_bf16_tma_descriptors used to perform.
     validate_bf16_operands<Schedule>(p);
-    if (p.rows % Schedule::kBlockRows || p.k % Schedule::kBlockK)
-        throw std::invalid_argument("BF16 TMA requires complete row/K tiles");
+    if ((!bf16_predicated_rows<Schedule> && p.rows % Schedule::kBlockRows) ||
+        p.k % (bf16_predicated_k<Schedule> ? 8 : Schedule::kBlockK))
+        throw std::invalid_argument("BF16 TMA requires compatible row/K tiles");
     for_each_token_slice(p.tokens, Schedule::kBlockTokens, [&](int offset, int count) {
-        const auto blocks = static_cast<std::int64_t>(p.rows / Schedule::kBlockRows) *
+        const auto blocks = static_cast<std::int64_t>(bf16_predicated_rows<Schedule>
+                                                          ? div_up(p.rows, Schedule::kBlockRows)
+                                                          : p.rows / Schedule::kBlockRows) *
                             div_up(count, Schedule::kBlockTokens);
         if (blocks > 2147483647LL)
             throw std::invalid_argument("BF16 TMA grid exceeds CUDA grid.x capacity");

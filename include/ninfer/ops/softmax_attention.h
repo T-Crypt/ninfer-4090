@@ -3,6 +3,7 @@
 #include "ninfer/ops/attention_geometry.h"
 
 #include "core/arena.h"
+#include "core/device.h"
 #include "core/paged_kv_cache.h"
 #include "core/tensor.h"
 
@@ -133,14 +134,16 @@ void packed_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
  * update-compatible across valid envelopes. Live row lengths determine the KV work partition within
  * each capture. Inputs, output, every cache plane/table, and live workspace suballocations are
  * pairwise non-overlapping. The Op overwrites every addressed cache row but owns no cache
- * allocation, frontier, request identity, or commit authority.
+ * allocation, frontier, request identity, or commit authority. `execution` supplies the stream and
+ * positive physical SM count used for launch and workspace planning; capacity queries must use the
+ * same count as execution.
  */
 void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
                               const Tensor& positions, const Tensor& valid_columns,
                               const Tensor& kv_table_rows, AttentionHeadGeometry geometry,
                               float scale, PagedKVBatchLayerView cache,
                               CausalAttentionExecutionEnvelope envelope, WorkspaceArena& workspace,
-                              Tensor& out, cudaStream_t stream);
+                              Tensor& out, DeviceExecutionView execution);
 
 /**
  * Read-only single-sequence causal attention over an already populated cache.
@@ -154,17 +157,19 @@ void causal_softmax_attention_cached(const Tensor& q, const Tensor& positions,
                                      AttentionHeadGeometry geometry, float scale,
                                      const PagedKVLayerView& cache,
                                      CausalAttentionExecutionEnvelope envelope,
-                                     WorkspaceArena& workspace, Tensor& out, cudaStream_t stream);
+                                     WorkspaceArena& workspace, Tensor& out,
+                                     DeviceExecutionView execution);
 
 /**
  * Return transient capacity for every W in the inclusive interval at one exact batch size. The
- * head geometry, cache dtype, and execution envelope are fixed implementation-profile inputs.
+ * head geometry, cache dtype, execution envelope and device SM count are fixed
+ * implementation-profile inputs.
  * Invalid profiles or intervals throw. The returned capacity may be zero.
  */
 [[nodiscard]] std::size_t causal_softmax_attention_workspace_capacity_bytes(
     AttentionHeadGeometry geometry, KvCacheStorage cache_storage,
     CausalAttentionExecutionEnvelope envelope, std::int32_t batch_size, std::int32_t min_tokens,
-    std::int32_t max_tokens);
+    std::int32_t max_tokens, DeviceExecutionView execution);
 
 /**
  * Non-causal grouped-query attention over persistent context plus one live query block.

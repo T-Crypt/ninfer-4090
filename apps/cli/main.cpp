@@ -9,6 +9,8 @@
 
 #include <cstdint>
 #include <exception>
+#include <fstream>
+#include <iterator>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -154,7 +156,7 @@ private:
 void print_generation_summary(const ninfer::GenerationResult& result,
                               const ninfer::ResolvedSamplingParameters& sampling,
                               const ninfer::MemorySummary& memory) {
-    print_stage("prepare", "render/preprocess", result.timings.prepare_seconds);
+    print_stage("prepare", "request preparation", result.timings.prepare_seconds);
     print_stage("generate", "vision", result.timings.vision_seconds);
     print_stage("generate", "text prefill", result.timings.prefill_seconds);
     print_stage("generate", "decode", result.timings.decode_seconds);
@@ -267,6 +269,22 @@ int main(int argc, char** argv) {
         input.options.reasoning_effort = cli.reasoning_effort;
 
         ninfer::RequestOptions request;
+        if (cli.json_object)
+            request.constraint = ninfer::OutputConstraint::json_object();
+        else if (cli.regex)
+            request.constraint = ninfer::OutputConstraint::regex(*cli.regex);
+        else if (!cli.choices.empty())
+            request.constraint = ninfer::OutputConstraint::choice(cli.choices);
+        else if (!cli.grammar_path.empty() || !cli.json_schema_path.empty()) {
+            const auto& path = cli.grammar_path.empty() ? cli.json_schema_path : cli.grammar_path;
+            std::ifstream file(path, std::ios::binary);
+            if (!file) throw std::invalid_argument("cannot open constraint file: " + path.string());
+            std::string source(std::istreambuf_iterator<char>(file), {});
+            if (file.bad()) throw std::runtime_error("failed to read constraint file");
+            request.constraint = cli.grammar_path.empty()
+                                     ? ninfer::OutputConstraint::json_schema(std::move(source))
+                                     : ninfer::OutputConstraint::grammar(std::move(source));
+        }
         request.execution.sampling                = cli.sampling;
         request.execution.requested_output_tokens = cli.max_new;
         request.execution.thinking.budget         = cli.thinking_budget;
@@ -285,12 +303,12 @@ int main(int argc, char** argv) {
         engine_options.speculative        = cli.speculative;
         engine_options.enable_vision      = cli.enable_vision;
         engine_options.use_cuda_graph     = cli.use_cuda_graph;
-        // One CLI invocation owns exactly one request, so retained cross-request context has no
-        // consumer and must not reserve an extra Device StateImage or run terminal capture.
-        engine_options.context_cache.enabled                = false;
-        engine_options.context_cache.host_state_slots       = 0;
-        engine_options.context_cache.host_kv_capacity_bytes = 0;
-        engine_options.startup_observer                     = startup_log.observer();
+        // One CLI invocation owns exactly one request and needs neither history nor pause
+        // storage, so select those resource capacities explicitly.
+        engine_options.context_cache.enabled             = false;
+        engine_options.context_cache.device_state_slots  = 0;
+        engine_options.context_cache.host_capacity_bytes = 0;
+        engine_options.startup_observer                  = startup_log.observer();
 
         ninfer::Engine engine(std::move(engine_options));
         startup_log.engine_ready(engine.load_summary());

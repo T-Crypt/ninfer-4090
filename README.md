@@ -5,7 +5,7 @@
 NInfer is a from-scratch C++/CUDA inference engine for Qwen3.5 Dense and MoE architectures on a
 single NVIDIA GeForce RTX 5090. It runs text, image, and video prompts through a local CLI or
 OpenAI-/Anthropic-compatible HTTP APIs. The runtime is deliberately specialized: one GPU, one
-resident model, and a startup-fixed capacity of one to eight active requests.
+resident model, and one to eight execution lanes fixed at startup.
 
 Five official artifacts are available. The quick-start commands use Qwen3.8-27B NVFP4.
 
@@ -62,8 +62,7 @@ hf download neroued/Qwen3.8-27B-nvfp4-NInfer \
   --local-dir models
 ```
 
-Start a long-running text/agent server with two active-request lanes and explicit Device/Host
-checkpoint capacity:
+Start a long-running text/agent server with two execution lanes and prefix caching:
 
 ```bash
 ./build/apps/ninfer-serve models/qwen3_8_27b_nvfp4.ninfer \
@@ -72,17 +71,16 @@ checkpoint capacity:
   --max-concurrency 2 \
   --kv-dtype fp8 \
   --device-state-slots 2 \
-  --host-state-slots 8 \
-  --host-kv-mib 8192 \
   --spec mtp --draft-tokens 3 \
   --lm-head-draft \
   --preserve-thinking
 ```
 
 Each request has a 240,000-token logical ceiling. A shared 240,000-token Device KV pool serves
-admitted requests; two requests run concurrently when their combined reservations fit. The cache
-tiers provide two Device checkpoint slots, eight pinned Host State slots, and 8 GiB of pinned Host
-KV beyond the two active StateImages.
+resident requests and retained prefixes. Requests acquire KV pages as execution advances; under
+pressure, the scheduler can pause a request and resume it later. The profile provides two extra
+Device StateImages and the default shared pinned Host budget: 8 GiB plus eight model StateImages,
+used for retained state, KV and pause snapshots.
 
 Send an OpenAI-style request:
 
@@ -119,10 +117,11 @@ diagnostics. Use `--messages FILE` and `--vision` for structured image/video inp
 
 ## Resource-aware long-context reuse
 
-A reusable prefix checkpoint contains KV and the complete continuation state for its exact prompt
-frontier. A Device-resident checkpoint resumes directly. Under pressure, the planner weighs Device
-retention, pinned Host State/KV, and eviction by immediate restore work and later reuse cost. Active
-requests retain their completion reservations.
+A reusable checkpoint combines KV with the complete continuation state at an exact token frontier.
+The engine retains completed conversation endpoints and stable input boundaries for multi-turn and
+agent reuse. Inactive checkpoints share Device and pinned Host capacity; pressure reclaims retained
+resources before pausing resident requests. Paused requests resume from a snapshot or rebuild their
+state by replaying already committed tokens.
 
 See [Resource scheduling and context cache](docs/maintainer/resource-scheduling-and-context-cache.md)
 for the algorithm and [Serve TTFT benchmark](tools/bench/ttft/) for public-HTTP coverage of hot
@@ -213,8 +212,6 @@ docker run --rm \
   --max-concurrency 2 \
   --kv-dtype fp8 \
   --device-state-slots 2 \
-  --host-state-slots 8 \
-  --host-kv-mib 8192 \
   --spec mtp --draft-tokens 3 \
   --lm-head-draft \
   --preserve-thinking
@@ -243,9 +240,9 @@ and either full or optimized proposal heads.
 The product boundary remains intentionally small:
 
 - one RTX 5090 and one resident model per Engine;
-- a startup-fixed capacity of one to eight active requests with bounded FIFO ingress;
-- no request preemption, priority/QoS, active-request swapping, weight offload, multi-GPU, or
-  distributed serving;
+- one to eight resident execution lanes with bounded FIFO ingress;
+- resource-pressure preemption with snapshot or token-replay recovery;
+- no priority/QoS, weight offload, multi-GPU, or distributed serving;
 - one shared startup-fixed KV pool across active requests and retained prefixes;
 - model architectures and format/shape combinations use explicitly implemented native paths;
 - parsed tool calls are returned to the client; NInfer does not execute tools;
