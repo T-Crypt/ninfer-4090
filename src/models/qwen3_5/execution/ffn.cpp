@@ -1,5 +1,7 @@
 #include "models/qwen3_5/execution/ffn.h"
 
+#include "models/qwen3_5/execution/policy.h"
+
 #include "core/layout.h"
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/linear_add.h"
@@ -12,7 +14,7 @@
 namespace ninfer::models::qwen3_5::execution {
 
 std::size_t ffn_workspace_bytes(const FfnParameters& parameters, std::int32_t first,
-                                std::int32_t last, bool mtp) {
+                                std::int32_t last, bool mtp, TextPhase phase) {
     if (first <= 0 || last < first) { throw std::invalid_argument("FFN: invalid column interval"); }
     if (const auto* moe = std::get_if<ops::SparseMoeWeights>(&parameters)) {
         return ops::sparse_moe_workspace_capacity_bytes(moe->routed_gate_up.qtype,
@@ -38,12 +40,12 @@ std::size_t ffn_workspace_bytes(const FfnParameters& parameters, std::int32_t fi
         {
             auto scope = layout.scope();
             (void)layout.alloc_bytes(ops::linear_swiglu_workspace_capacity_bytes(
-                gu.qtype, gu.n, gu.k, p.gate_up.policy, first, last));
+                gu.qtype, gu.n, gu.k, body_policy(gu, p.gate_up.policy, phase), first, last));
         }
         {
             auto scope = layout.scope();
             (void)layout.alloc_bytes(ops::linear_add_workspace_capacity_bytes(
-                down.qtype, down.n, down.k, p.down.policy, first, last));
+                down.qtype, down.n, down.k, body_policy(down, p.down.policy, phase), first, last));
         }
     }
     return layout.peak_bytes(1);
@@ -51,7 +53,7 @@ std::size_t ffn_workspace_bytes(const FfnParameters& parameters, std::int32_t fi
 
 void ffn(const Tensor& hidden, const FfnParameters& parameters, Tensor& residual,
          const ops::SparseMoeHints& hints, WorkspaceArena& workspace, cudaStream_t stream,
-         bool mtp) {
+         bool mtp, TextPhase phase) {
     auto scope         = workspace.scope();
     const auto columns = hidden.ne[1];
     if (const auto* moe = std::get_if<ops::SparseMoeWeights>(&parameters)) {
@@ -82,9 +84,11 @@ void ffn(const Tensor& hidden, const FfnParameters& parameters, Tensor& residual
     Tensor activation = workspace.alloc(DType::BF16, {gu.n / 2, columns});
     {
         auto call = workspace.scope();
-        ops::linear_swiglu(hidden, gu, activation, p.gate_up.policy, workspace, stream);
+        ops::linear_swiglu(hidden, gu, activation, body_policy(gu, p.gate_up.policy, phase),
+                           workspace, stream);
     }
-    ops::linear_add(activation, down, residual, p.down.policy, workspace, stream);
+    ops::linear_add(activation, down, residual, body_policy(down, p.down.policy, phase), workspace,
+                    stream);
 }
 
 } // namespace ninfer::models::qwen3_5::execution

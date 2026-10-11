@@ -1,12 +1,14 @@
 #pragma once
 
 #include "models/qwen3_5/execution/parameters.h"
+#include "models/qwen3_5/program/program.h"
 #include "core/device.h"
 
 namespace ninfer::models::qwen3_5::execution {
 
 [[nodiscard]] std::size_t gdn_projection_workspace_bytes(const GdnParameters& parameters,
-                                                         std::int32_t first, std::int32_t last);
+                                                         std::int32_t first, std::int32_t last,
+                                                         TextPhase phase = TextPhase::Verify);
 [[nodiscard]] std::size_t gdn_snapshot_workspace_bytes(const GdnParameters& parameters,
                                                        const GdnConfig& config, std::int32_t batch,
                                                        std::int32_t first_width,
@@ -16,7 +18,8 @@ namespace ninfer::models::qwen3_5::execution {
                                                      std::int32_t first_width,
                                                      std::int32_t last_width);
 void gdn_projection(const Tensor& hidden, const GdnParameters& parameters, Tensor& qkv, Tensor& z,
-                    WorkspaceArena& workspace, cudaStream_t stream);
+                    WorkspaceArena& workspace, cudaStream_t stream,
+                    TextPhase phase = TextPhase::Verify);
 void gdn_norm_control(const Tensor& residual, const Tensor& norm, float epsilon,
                       const GdnParameters& parameters, Tensor& hidden, Tensor& g, Tensor& beta,
                       WorkspaceArena& workspace, DeviceExecutionView execution);

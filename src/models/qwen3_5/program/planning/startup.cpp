@@ -2,6 +2,7 @@
 #include "models/qwen3_5/execution/ffn.h"
 #include "models/qwen3_5/execution/gdn.h"
 #include "models/qwen3_5/execution/mtp.h"
+#include "models/qwen3_5/execution/policy.h"
 #include "models/qwen3_5/program/planning/graph_profiles.h"
 #include "models/qwen3_5/program/internal.h"
 #include "models/qwen3_5/program/planning/startup.h"
@@ -301,9 +302,11 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                                              p.policy, first, last));
     };
     const auto add_scratch = [&](WorkspaceLayoutBuilder& layout,
-                                 const execution::LinearParameters& p, int first, int last) {
+                                 const execution::LinearParameters& p, int first, int last,
+                                 TextPhase phase = TextPhase::Verify) {
         scratch(layout, ops::linear_add_workspace_capacity_bytes(
-                            p.weight.qtype, p.weight.n, p.weight.k, p.policy, first, last));
+                            p.weight.qtype, p.weight.n, p.weight.k,
+                            execution::body_policy(p.weight, p.policy, phase), first, last));
     };
     const auto target_body = [&](WorkspaceLayoutBuilder& layout, std::int32_t first,
                                  std::int32_t last, TextPhase phase, GdnWorkspacePath path,
@@ -316,8 +319,8 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                 if (const auto* attention =
                         std::get_if<execution::AttentionParameters>(&block.mixer)) {
                     (void)workspace::text_attention_projection(layout, config, last);
-                    scratch(layout, execution::attention_projection_workspace_bytes(*attention,
-                                                                                    first, last));
+                    scratch(layout, execution::attention_projection_workspace_bytes(
+                                        *attention, first, last, phase));
                     (void)workspace::text_attention_results(layout, config, last);
                     scratch(layout,
                             ops::causal_softmax_attention_workspace_capacity_bytes(
@@ -325,7 +328,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                  dimension(config.attention->num_attention_heads),
                                  dimension(config.attention->num_key_value_heads)},
                                 plan.kv_storage, envelope, batch_size, min_width, max_width));
-                    add_scratch(layout, attention->output, first, last);
+                    add_scratch(layout, attention->output, first, last, phase);
                 } else {
                     const auto& gdn = std::get<execution::GdnParameters>(block.mixer);
                     (void)workspace::gdn_control(layout, config, last);
@@ -341,8 +344,8 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                             gdn, *config.gdn, batch_size, min_width, max_width));
                     } else {
                         (void)workspace::gdn_prefill_conv(layout, config, last);
-                        scratch(layout,
-                                execution::gdn_projection_workspace_bytes(gdn, first, last));
+                        scratch(layout, execution::gdn_projection_workspace_bytes(gdn, first,
+                                                                                  last, phase));
                     }
                     (void)workspace::gdn_recurrent_output(layout, config, last);
                     if (path == GdnWorkspacePath::Prefill) {
@@ -352,12 +355,12 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                     dimension(config.gdn->linear_num_value_heads), first, last));
                     }
                     (void)workspace::gdn_normalized_output(layout, config, last);
-                    add_scratch(layout, gdn.output, first, last);
+                    add_scratch(layout, gdn.output, first, last, phase);
                 }
             }
             auto stage = layout.scope();
             (void)workspace::post_mixer_hidden(layout, config, last);
-            scratch(layout, execution::ffn_workspace_bytes(block.ffn, first, last));
+            scratch(layout, execution::ffn_workspace_bytes(block.ffn, first, last, false, phase));
         }
         if (!plan.causal_scoring) {
             linear_scratch(layout, parameters.text.output_head, first, last);

@@ -1,5 +1,7 @@
 #include "models/qwen3_5/execution/gdn.h"
 
+#include "models/qwen3_5/execution/policy.h"
+
 #include "ninfer/ops/gdn_gating_proj.h"
 #include "ninfer/ops/gdn_input_proj.h"
 
@@ -9,16 +11,20 @@
 namespace ninfer::models::qwen3_5::execution {
 
 std::size_t gdn_projection_workspace_bytes(const GdnParameters& parameters, std::int32_t first,
-                                           std::int32_t last) {
+                                           std::int32_t last, TextPhase phase) {
     if (first <= 0 || last < first) {
         throw std::invalid_argument("GDN projection: invalid column interval");
     }
     if (const auto* single = std::get_if<LinearParameters>(&parameters.projection)) {
         const auto& w = single->weight;
-        return ops::gdn_input_proj_workspace_capacity_bytes(w.qtype, w.n, w.k, single->policy,
-                                                            first, last);
+        return ops::gdn_input_proj_workspace_capacity_bytes(
+            w.qtype, w.n, w.k, body_policy(w, single->policy, phase), first, last);
     }
-    return 0;
+    const auto& pair  = std::get<ops::PairedProjectionWeights>(parameters.projection);
+    const auto policy = body_policy(pair.first, ops::LinearPolicy::A16Only, phase);
+    return policy == ops::LinearPolicy::A16Only
+               ? 0
+               : ops::gdn_input_proj_workspace_capacity_bytes(pair.first.k, policy, first, last);
 }
 
 std::size_t gdn_snapshot_workspace_bytes(const GdnParameters& parameters, const GdnConfig& config,
@@ -59,12 +65,19 @@ std::size_t gdn_record_workspace_bytes(const GdnParameters& parameters, const Gd
 }
 
 void gdn_projection(const Tensor& hidden, const GdnParameters& parameters, Tensor& qkv, Tensor& z,
-                    WorkspaceArena& workspace, cudaStream_t stream) {
+                    WorkspaceArena& workspace, cudaStream_t stream, TextPhase phase) {
     if (const auto* pair = std::get_if<ops::PairedProjectionWeights>(&parameters.projection)) {
-        ops::gdn_input_proj(hidden, pair->first, pair->second, qkv, z, stream);
+        const auto policy = body_policy(pair->first, ops::LinearPolicy::A16Only, phase);
+        if (policy == ops::LinearPolicy::A16Only) {
+            ops::gdn_input_proj(hidden, pair->first, pair->second, qkv, z, stream);
+        } else {
+            ops::gdn_input_proj(hidden, pair->first, pair->second, qkv, z, policy, workspace,
+                                stream);
+        }
     } else {
         const auto& single = std::get<LinearParameters>(parameters.projection);
-        ops::gdn_input_proj(hidden, single.weight, qkv, z, single.policy, workspace, stream);
+        ops::gdn_input_proj(hidden, single.weight, qkv, z,
+                            body_policy(single.weight, single.policy, phase), workspace, stream);
     }
 }
 
