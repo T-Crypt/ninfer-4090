@@ -367,3 +367,39 @@ Raw data: homelab `state/evals/2026-10-10/v3-parity/`. Draft PR for sergiuszm's 
 https://github.com/sergiuszm/ninfer-4090/pull/16 (do not mark ready until he reviews; stage 4-6 open).
 Not carried yet: rtx4090-port commits after `8e616981` (`cb2df08a` MSVC, `b8c71f00` portable_u128,
 `49deb207` #9 entitlement fix, 2 docs).
+
+## Stages 4 and 6 (2026-10-11): INT8 prefill carried, bench green, deployed on aphotic
+
+`port/v3-forward` at `322a7f51`. **INT8 group-64 prefill**, the item deferred in round 3: the v3 artifact
+declares every groupwise use `A16Only`, so the phase decides in the model layer, as the fork's
+`groupwise_policy(phase)` did. `src/models/qwen3_5/execution/policy.h` `body_policy(weight, declared, phase)`
+gives Q4/Q5 group-64 weights `AllowA8` in `TextPhase::Prefill` (`NINFER_A16_PREFILL=1` holds A16). It is threaded
+through the attention and GDN input projections (paired and single), both output `linear_add`s, the dense FFN,
+and the startup workspace sizer. MTP, vision and verify keep the declared policy.
+
+Stage-4 inventory against the production entry: response `timings` were already identical to v2; every flag
+the deploy passes is accepted; `/slots` save/restore is unused in production (no `--slot-save-path`) and stays
+uncarried.
+
+**Stage 6 bench** (same card, llama-swap stopped; both INT8 prefill, `rk4v4-e8`, MTP3, prefix reuse off, 3 runs):
+
+| | v2 `46645ada` | v3 `322a7f51` | v3/v2 |
+|---|---|---|---|
+| startup to /health | 35.7 s | 37.0 s | |
+| prefill 1.5K tokens | 3,404 t/s | 3,463 t/s | 1.02 |
+| prefill 6.2K | 3,731 t/s | 3,789 t/s | 1.02 |
+| prefill 25K | 3,501 t/s | 3,550 t/s | 1.01 |
+| prefill 51K | 3,107 t/s | 3,146 t/s | 1.01 |
+| decode, code, greedy | 157.5 t/s (86.7% acc) | 156.3 t/s (88.7% acc) | 0.99 |
+
+Perplexity `--quick`, int8 KV: v3 INT8 prefill 4.343314 vs v3 A16 4.343023 (+0.007%). GPU ctest 119/124 with the
+27B v3 artifact: the DFlash/DFlash2/DFlash-prefill tests need a draft component this artifact lacks, `moe_real`
+needs the 35B MoE artifact, and `prefix_real` is the host-restore scenario open since stage 3. Greedy parity:
+near-ties only (same divergence point as the stage-3 A16 run).
+
+**Deployed** 2026-10-11 13:57 on aphotic: llama-swap `NInfer-Qwen3.8-27B` runs `322a7f51` on the v3 artifact
+(the HauHauCS entry stays on v2 until its artifact is upgraded). Raw data: homelab
+`state/evals/2026-10-11/v3-switch/`.
+
+Open: `prefix_real` host restore; stage 5 (rebase onto upstream Target B); `/slots` if ever needed; HauHauCS
+artifact upgrade to v3.
