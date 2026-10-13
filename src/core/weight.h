@@ -16,6 +16,7 @@ enum class QType : std::uint16_t {
     INT32               = 6,
     NVFP4               = 7,
     FP8_E4M3FN_ROW_BF16 = 8,
+    Q4_G32_FP16_ROWS     = 10,
 };
 
 enum class QuantLayout : std::uint16_t {
@@ -23,6 +24,7 @@ enum class QuantLayout : std::uint16_t {
     Contiguous          = 1,
     BlockScaleK16M128x4 = 2,
     RowScale            = 3,
+    RowGroup            = 5,
 };
 
 struct Weight {
@@ -47,6 +49,16 @@ struct Weight {
     std::int64_t scale_nb[4]   = {0, 0, 0, 0};
     float weight_scale_divisor = 0.0F;
     float input_scale_divisor  = 0.0F;
+
+    // An NVFP4 plane assembled from several source matrices carries one divisor per source, in the
+    // payload after the scales. `weight_divisors` addresses them and `weight_divisor_rows` says how
+    // many consecutive rows each covers, so the divisor of row r is element r /
+    // weight_divisor_rows. A plane with one source sets the rows to its own row count, which makes
+    // that index zero for every row, and `weight_scale_divisor` is then the whole story. On a stack
+    // `weight_scale_divisor` holds only the first source's word, so a route that reads it for any
+    // other row is silently wrong by a scale factor.
+    const void* weight_divisors      = nullptr;
+    std::int32_t weight_divisor_rows = 0;
 };
 
 } // namespace ninfer
