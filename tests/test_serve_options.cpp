@@ -33,6 +33,8 @@ int main() {
     failures += check(defaults.allow_prefix_reuse, "prefix reuse is not enabled by default");
     failures +=
         check(!defaults.preserve_thinking, "thinking history is unexpectedly preserved by default");
+    failures += check(!defaults.tolerant_tool_calls,
+                      "tolerant tool-call recovery is unexpectedly on by default");
     failures += check(!defaults.enable_vision, "Vision is not disabled by default");
     failures += check(defaults.request_log_jsonl.empty(),
                       "request JSONL logging is not disabled by default");
@@ -136,25 +138,44 @@ int main() {
     failures += check(resolve_public_model_id(defaults, "artifact-model") == "artifact-model",
                       "artifact model id was not selected by default");
 
-    const ServeOptions rotor =
-        parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "rk8v4"});
-    failures += check(
-        rotor.kv_cache == ninfer::KvCacheStorage::RotatedInt8KeyInt4ValueGroup64,
-        "--kv-dtype rk8v4 did not select rotated K8/V4 storage");
-    failures += check(defaults.kv_cache == ninfer::KvCacheStorage::BFloat16,
-                      "rk8v4 unexpectedly changed the default KV storage");
+    // --auto-long-anchors: unset by default so it can follow the resolved anchor cap.
+    failures += check(!defaults.auto_long_anchors.has_value(),
+                      "--auto-long-anchors is not left to the anchor cap by default");
+    const ServeOptions anchors =
+        parse({"ninfer-serve", "model.ninfer", "--auto-long-anchors", "3"});
+    failures += check(anchors.auto_long_anchors == 3U, "--auto-long-anchors was not applied");
+    bool missing_anchor_value_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--auto-long-anchors"});
+    } catch (const std::invalid_argument&) { missing_anchor_value_rejected = true; }
+    failures += check(missing_anchor_value_rejected, "--auto-long-anchors accepted no value");
+    {
+        ninfer::ContextCacheOptions resolved;
+        resolved.enabled                           = true;
+        resolved.max_long_anchors_per_continuation = 2;
+        failures += check(resolve_automatic_private_anchors(defaults, resolved) == 2U,
+                          "unset --auto-long-anchors does not follow the resolved anchor cap");
+        failures += check(resolve_automatic_private_anchors(anchors, resolved) == 2U,
+                          "--auto-long-anchors above the anchor cap was not clamped to it");
+        const ServeOptions none =
+            parse({"ninfer-serve", "model.ninfer", "--auto-long-anchors", "0"});
+        failures += check(resolve_automatic_private_anchors(none, resolved) == 0U,
+                          "--auto-long-anchors 0 did not disable automatic anchors");
+        const ServeOptions one =
+            parse({"ninfer-serve", "model.ninfer", "--auto-long-anchors", "1"});
+        failures += check(resolve_automatic_private_anchors(one, resolved) == 1U,
+                          "--auto-long-anchors below the cap was not honored");
+        ninfer::ContextCacheOptions disabled;
+        disabled.enabled = false;
+        failures += check(resolve_automatic_private_anchors(defaults, disabled) == 0U,
+                          "a disabled context cache still proposes automatic anchors");
+        const ServeOptions no_reuse =
+            parse({"ninfer-serve", "model.ninfer", "--no-prefix-reuse"});
+        failures += check(no_reuse.auto_long_anchors == 0U &&
+                              resolve_automatic_private_anchors(no_reuse, resolved) == 0U,
+                          "--no-prefix-reuse did not disable automatic anchors");
+    }
 
-    const ServeOptions k4e8 =
-        parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "rk4v4-e8"});
-    failures += check(
-        k4e8.kv_cache == ninfer::KvCacheStorage::RK4V4E8,
-        "--kv-dtype rk4v4-e8 did not select RK4V4E8 storage");
-
-    const ServeOptions k2e8 =
-        parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "rk2v4-e8"});
-    failures += check(
-        k2e8.kv_cache == ninfer::KvCacheStorage::RK2V4E8,
-        "--kv-dtype rk2v4-e8 did not select RK2V4E8 storage");
     const ServeOptions fp8 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "fp8"});
     failures += check(fp8.kv_cache == ninfer::KvCacheStorage::Fp8E4M3Row256,
                       "--kv-dtype fp8 did not select row-scaled E4M3 KV");
@@ -165,9 +186,17 @@ int main() {
     failures += check(k8v4.kv_cache == ninfer::KvCacheStorage::Fp8KeyNvfp4Value,
                       "--kv-dtype k8v4 did not select asymmetric K8V4 KV");
     const std::string kv_help = serve_usage_text("ninfer-serve");
-    failures += check(kv_help.find("nvfp4") != std::string::npos &&
-                          kv_help.find("k8v4") != std::string::npos,
+    // sm_89 production KV modes; nvfp4/k8v4 still parse but are refused at startup on Ada.
+    failures += check(kv_help.find("rk4v4-e8") != std::string::npos &&
+                          kv_help.find("int8") != std::string::npos,
                       "serve help omits a production KV storage mode");
+    const ServeOptions e8 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "rk4v4-e8"});
+    failures += check(e8.kv_cache == ninfer::KvCacheStorage::RK4V4E8,
+                      "--kv-dtype rk4v4-e8 did not select RK4V4 E8 KV");
+    const ServeOptions vision_cap =
+        parse({"ninfer-serve", "model.ninfer", "--vision-max-tokens", "4096"});
+    failures += check(vision_cap.enable_vision && vision_cap.vision_max_tokens == 4096,
+                      "--vision-max-tokens did not enable Vision with the requested cap");
 
     const ServeOptions model_alias =
         parse({"ninfer-serve", "model.ninfer", "--model-id", "deployment-alias"});
@@ -245,6 +274,7 @@ int main() {
                                            "--log-stats-interval-ms",
                                            "0",
                                            "--preserve-thinking",
+                                           "--tolerant-tool-calls",
                                            "--media-cache-mib",
                                            "256",
                                            "--media-live-mib",
@@ -257,8 +287,10 @@ int main() {
                           configured.context_cache.host_kv_capacity_bytes == 0,
                       "root-only server mode retained default Host capacities");
     failures += check(configured.enable_vision, "--vision did not enable Vision");
-    failures +=
-        check(configured.preserve_thinking, "--preserve-thinking did not reach serving options");
+    failures += check(configured.preserve_thinking == true,
+                      "--preserve-thinking did not reach serving options");
+    failures += check(configured.tolerant_tool_calls,
+                      "--tolerant-tool-calls did not reach serving options");
     failures +=
         check(configured.max_concurrency == 4, "--max-concurrency did not reach serving options");
     failures += check(configured.max_context == 4096 &&
@@ -326,15 +358,10 @@ int main() {
                       "server accepted top_k beyond the executable candidate domain");
 
     GenerationRequest request;
-    request.max_tokens = 1;
-    ninfer::PromptCapabilities prompt_capabilities;
-    prompt_capabilities.enable_thinking                 = true;
-    prompt_capabilities.reasoning_effort.low            = true;
-    prompt_capabilities.reasoning_effort.xhigh          = true;
-    prompt_capabilities.reasoning_effort.default_effort = ninfer::ReasoningEffort::XHigh;
-    const auto semantics = resolve_prompt_semantics(request, defaults, prompt_capabilities);
-    failures += check(!semantics.reasoning_effort &&
-                          semantics.effective_reasoning_effort == ninfer::ReasoningEffort::XHigh,
+    request.max_tokens   = 1;
+    const auto semantics = resolve_prompt_semantics(request, defaults);
+    failures += check(!semantics.reasoning_effort && !semantics.enable_thinking &&
+                          !semantics.reasoning_effort,
                       "omitted reasoning effort did not resolve to the template default");
     failures +=
         check(to_request_options(request, defaults, semantics, true).execution.allow_prefix_reuse,
@@ -357,9 +384,8 @@ int main() {
                 .execution.thinking.budget == 37,
         "thinking-enabled request did not inherit the server budget");
     request.enable_thinking = false;
-    const auto non_thinking =
-        resolve_prompt_semantics(request, thinking_budget, prompt_capabilities);
-    failures += check(!non_thinking.effective_reasoning_effort,
+    const auto non_thinking = resolve_prompt_semantics(request, thinking_budget);
+    failures += check(!non_thinking.reasoning_effort,
                       "disabled thinking retained an effective reasoning effort");
     failures += check(!to_request_options(request, thinking_budget, non_thinking,
                                           thinking_budget.allow_prefix_reuse)
@@ -367,19 +393,16 @@ int main() {
                       "non-thinking request inherited the server thinking budget");
     request.enable_thinking.reset();
     request.reasoning_effort   = RequestedReasoningEffort::Low;
-    const auto explicit_effort = resolve_prompt_semantics(request, defaults, prompt_capabilities);
-    failures +=
-        check(explicit_effort.reasoning_effort == ninfer::ReasoningEffort::Low &&
-                  explicit_effort.effective_reasoning_effort == ninfer::ReasoningEffort::Low,
-              "explicit reasoning effort did not remain the effective effort");
+    const auto explicit_effort = resolve_prompt_semantics(request, defaults);
+    failures += check(explicit_effort.reasoning_effort == ninfer::ReasoningEffort::Low &&
+                          explicit_effort.enable_thinking == true,
+                      "explicit reasoning effort did not remain the effective effort");
     request.reasoning_effort.reset();
-    failures +=
-        check(resolve_prompt_semantics(request, configured, prompt_capabilities).preserve_thinking,
-              "server preserve-thinking default was not resolved");
+    failures += check(resolve_prompt_semantics(request, configured).preserve_thinking == true,
+                      "server preserve-thinking default was not resolved");
     request.preserve_thinking = false;
-    failures +=
-        check(!resolve_prompt_semantics(request, configured, prompt_capabilities).preserve_thinking,
-              "request preserve-thinking override did not win");
+    failures += check(resolve_prompt_semantics(request, configured).preserve_thinking == false,
+                      "request preserve-thinking override did not win");
 
     failures +=
         check(serve_usage_text("ninfer-serve").find("--no-prefix-reuse") != std::string::npos,
@@ -392,6 +415,9 @@ int main() {
     failures +=
         check(serve_usage_text("ninfer-serve").find("--preserve-thinking") != std::string::npos,
               "serve help omits --preserve-thinking");
+    failures += check(
+        serve_usage_text("ninfer-serve").find("--tolerant-tool-calls") != std::string::npos,
+        "serve help omits --tolerant-tool-calls");
     failures += check(serve_usage_text("ninfer-serve").find("--default-thinking-budget") !=
                           std::string::npos,
                       "serve help omits --default-thinking-budget");
@@ -413,9 +439,8 @@ int main() {
     failures +=
         check(serve_usage_text("ninfer-serve").find("--context-cost-presets") != std::string::npos,
               "serve help omits external context-cost presets");
-    failures +=
-        check(serve_usage_text("ninfer-serve").find("identity.model_id") != std::string::npos,
-              "serve help omits the artifact-derived model id default");
+    failures += check(serve_usage_text("ninfer-serve").find("metadata.name") != std::string::npos,
+                      "serve help omits the artifact-derived model id default");
 
     const ServeOptions inherited =
         parse({"ninfer-serve", "model.ninfer", "--max-context", "16384"});

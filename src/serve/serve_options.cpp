@@ -83,13 +83,14 @@ std::string serve_usage_text(const char* argv0) {
            "[--device-state-slots N] [--host-state-slots N] [--host-kv-mib N] "
            "[--max-private-continuations N] [--max-shared-prefixes N] "
            "[--max-long-anchors-per-continuation N] [--auto-long-anchors N] "
-           "[--request-log-jsonl FILE] [--slot-save-path DIR] [--auto-save-evicted] "
+           "[--request-log-jsonl FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
-           "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8] "
-           "[--spec mtp|dflash|dflash2 --draft-tokens N] "
+           "[--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8] [--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--vision-max-tokens N] [--no-cuda-graph] [--no-prefix-reuse] "
-           "[--lm-head-draft] [--no-thinking] [--preserve-thinking] [--cors] "
+           "[--chat-template FILE] [--lm-head-draft] [--no-thinking] [--preserve-thinking] "
+           "[--tolerant-tool-calls] "
+           "[--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
            "[--frequency-penalty F] [--seed N] [--greedy]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n"
@@ -102,25 +103,7 @@ std::string serve_usage_text(const char* argv0) {
            "       --media-live-mib defaults to 2048 and bounds all live BF16 patch payloads\n"
            "       --media-preprocess-threads defaults to 0 (auto, at most 16 workers)\n"
            "       --request-log-jsonl appends full-precision server/request records\n"
-           "       --slot-save-path enables llama.cpp-style session persistence: POST "
-           "/slots/{id}?action=save|restore|erase with {\"filename\": NAME} moves one idle "
-           "slot's resident session to or from DIR (disabled when omitted)\n"
-           "       --turn-checkpoints is RETIRED and has no effect. Per-sequence rewrite "
-           "checkpoints and long anchors serve the same mid-history divergence, sized by "
-           "--max-long-anchors-per-continuation and placed by --auto-long-anchors; the value is "
-           "accepted and ignored so existing command lines keep starting, and the flag goes "
-           "away in a later release\n"
-           "       --auto-long-anchors N proposes a private long anchor at each of the last N "
-           "message boundaries of every prompt, so a client that rewrites recent history "
-           "restores at the anchor below the edit instead of re-prefilling from zero; coverage "
-           "reaches back only as far as the retained cap (the shallowest anchor is evicted when "
-           "the set is full), so raise it with --max-long-anchors-per-continuation and "
-           "--host-state-slots for deeper edits; defaults to the cap and is clamped to it; "
-           "0 disables (anchors then need explicit markers, which no HTTP protocol can place)\n"
-           "       --auto-save-evicted spills an involuntarily evicted session back to the "
-           "slot file it was last saved to or restored from, before the eviction destroys it "
-           "(requires --slot-save-path; explicit erase never auto-saves)\n"
-           "       --model-id overrides the artifact identity.model_id reported by the server\n"
+           "       --model-id overrides the artifact metadata.name reported by the server\n"
            "       Responses state is process-local and bounded to 1024 records / 256 MiB by "
            "default\n"
            "       --log-stats-interval-ms defaults to 5000; 0 disables periodic throughput logs\n"
@@ -134,9 +117,19 @@ std::string serve_usage_text(const char* argv0) {
            "shared=max(max-concurrency,4), anchors=2; Host state=8 slots, Host KV=8192 MiB\n"
            "       --device-state-slots is extra checkpoint capacity beyond active lanes; "
            "--host-kv-mib uses MiB\n"
+           "       --auto-long-anchors N proposes a private long anchor at each of the last N "
+           "message boundaries of every prompt, so a client that rewrites recent history "
+           "restores at the anchor below the edit instead of re-prefilling from zero; coverage "
+           "reaches back only as far as the retained cap (the shallowest anchor is evicted when "
+           "the set is full), so raise it with --max-long-anchors-per-continuation and "
+           "--host-state-slots for deeper edits; defaults to the cap and is clamped to it; "
+           "0 disables (anchors then need explicit markers, which no HTTP protocol can place)\n"
            "       --default-thinking-budget caps model-origin thinking for enabled requests; "
            "control tokens count toward the request output limit\n"
            "       --preserve-thinking retains closed-turn assistant reasoning in later prompts\n"
+           "       --tolerant-tool-calls recovers complete Qwen tool calls that the strict parser "
+           "would return\n"
+           "       as text: parameter values quoting tool markup, prose before or after the calls\n"
            "       sampler defaults come from the loaded model and resolved thinking mode; "
            "server flags and request fields override individual values.\n"
            "       --greedy forces temperature 0 (exact argmax).\n";
@@ -337,10 +330,14 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.allow_prefix_reuse = false;
         } else if (arg == "--lm-head-draft") {
             options.speculative.proposal_head = ProposalHead::Optimized;
+        } else if (arg == "--chat-template") {
+            options.chat_template_path = require_value("--chat-template");
         } else if (arg == "--no-thinking") {
             options.enable_thinking = false;
         } else if (arg == "--preserve-thinking") {
             options.preserve_thinking = true;
+        } else if (arg == "--tolerant-tool-calls") {
+            options.tolerant_tool_calls = true;
         } else if (arg == "--cors") {
             options.enable_cors = true;
         } else if (arg == "--temperature") {
@@ -421,12 +418,19 @@ ServeOptions parse_serve_options(int argc, char** argv) {
 }
 
 std::string resolve_public_model_id(const ServeOptions& options,
-                                    std::string_view artifact_model_id) {
+                                    std::string_view artifact_model_name) {
     if (options.model_id_override.has_value()) { return *options.model_id_override; }
-    if (artifact_model_id.empty()) {
-        throw std::logic_error("loaded artifact model_id must not be empty");
+    if (artifact_model_name.empty()) {
+        throw std::logic_error("loaded artifact model name must not be empty");
     }
-    return std::string(artifact_model_id);
+    return std::string(artifact_model_name);
+}
+
+std::uint32_t resolve_automatic_private_anchors(const ServeOptions& options,
+                                                const ContextCacheOptions& resolved) {
+    if (!resolved.enabled || !options.allow_prefix_reuse) { return 0; }
+    const std::uint32_t cap = resolved.max_long_anchors_per_continuation.value_or(0U);
+    return std::min(options.auto_long_anchors.value_or(cap), cap);
 }
 
 std::uint32_t resolve_automatic_private_anchors(const ServeOptions& options,

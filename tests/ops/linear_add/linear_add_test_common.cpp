@@ -1,3 +1,4 @@
+#include "core/weight.h"
 #include "core/device.h"
 #include "ops/linear_add/linear_add_test_common.h"
 
@@ -84,6 +85,17 @@ std::vector<std::int32_t> conformance_tokens(const ShapeCase& shape) {
             throw std::invalid_argument("linear_add test: route interior must be positive");
         }
         result.push_back(interior);
+    }
+    if (shape.composite_offset > 0) {
+        // The composite resolves its tail through the same table, so every route start is a
+        // boundary of the composite as well - exactly one whole wave later.
+        for (const std::int32_t boundary : shape.route_starts) {
+            result.push_back(shape.composite_offset + boundary - 1);
+            result.push_back(shape.composite_offset + boundary);
+            if (boundary != std::numeric_limits<std::int32_t>::max()) {
+                result.push_back(shape.composite_offset + boundary + 1);
+            }
+        }
     }
     std::sort(result.begin(), result.end());
     result.erase(std::unique(result.begin(), result.end()), result.end());
@@ -221,11 +233,13 @@ using HostWeight = std::variant<quantized_weight::PackedWeight, direct_bf16_weig
 QType qtype_for(WeightFormat format) {
     switch (format) {
     case WeightFormat::BF16:
-        return QType::BF16_CTRL;
+        return QType::BF16;
+    case WeightFormat::Q4G64F16S:
+        return QType::Q4_G64_FP16;
     case WeightFormat::Q5G64F16S:
-        return QType::Q5G64_F16S;
-    case WeightFormat::W8G32F16S:
-        return QType::W8G32_F16S;
+        return QType::Q5_G64_FP16;
+    case WeightFormat::Q8G32F16S:
+        return QType::Q8_G32_FP16;
     }
     throw std::invalid_argument("linear_add test: unknown weight format");
 }
@@ -235,8 +249,9 @@ HostWeight make_weight(WeightFormat format, const ShapeCase& shape) {
         return direct_bf16_weight::make_patterned(shape.n, shape.k, shape.seed);
     }
     const quantized_weight::PatternedWeightOptions options{
-        format == WeightFormat::Q5G64F16S ? quantized_weight::RowSplitScalePattern::Small
-                                          : quantized_weight::RowSplitScalePattern::Tiny,
+        (format == WeightFormat::Q4G64F16S || format == WeightFormat::Q5G64F16S)
+            ? quantized_weight::RowSplitScalePattern::Small
+            : quantized_weight::RowSplitScalePattern::Tiny,
         quantized_weight::RowSplitCodePattern::Hashed,
     };
     return quantized_weight::make_patterned_weight(qtype_for(format), shape.n, shape.k, shape.seed,
@@ -290,15 +305,58 @@ std::vector<float> materialize_weight_rows(const HostWeight& weight,
 
 bool cuda_available() { return !test::cuda_unavailable(); }
 
+namespace {
+
+// True when the case for `t` runs the graph-capture (AllowA4) and permissive
+// (AllowA8) replays in addition to the default-policy dispatch.
+bool case_replays(WeightFormat format, const ShapeCase& shape, std::int32_t t) {
+    return (t == 128 && format == WeightFormat::Q5G64F16S) ||
+           std::find(shape.graph_tokens.begin(), shape.graph_tokens.end(), t) !=
+               shape.graph_tokens.end();
+}
+
+// The case runs the default (A16Only) policy and, when it replays, AllowA4 and
+// AllowA8 as well. Formats whose routes are policy-independent report the same
+// zero capacity for every policy, so this only ever widens the arena for
+// formats that genuinely stage quantized activations (Q5's INT8 prefill route).
+std::size_t policies_workspace_bytes(QType qtype, std::int32_t n, std::int32_t k,
+                                     std::int32_t min_tokens, std::int32_t max_tokens,
+                                     const bool replays) {
+    std::size_t bytes =
+        ops::linear_add_workspace_capacity_bytes(qtype, n, k, min_tokens, max_tokens);
+    if (!replays) { return bytes; }
+    bytes = std::max(
+        bytes,
+        ops::linear_add_workspace_capacity_bytes(qtype, n, k, ops::LinearPolicy::AllowA4,
+                                                 min_tokens, max_tokens));
+    bytes = std::max(
+        bytes,
+        ops::linear_add_workspace_capacity_bytes(qtype, n, k, ops::LinearPolicy::AllowA8,
+                                                 min_tokens, max_tokens));
+    return bytes;
+}
+
+} // namespace
+
 int run_shape(std::string_view label, WeightFormat format, const ShapeCase& shape) {
     const std::vector<std::int32_t> tokens = conformance_tokens(shape);
     if (tokens.empty()) { throw std::invalid_argument("linear_add test: no token cases"); }
     const std::int32_t maximum_t = tokens.back();
 
-    const std::vector<std::int32_t> oracle_rows = sampled_indices(shape.n);
-    const QType qtype                           = qtype_for(format);
-    const HostWeight host_weight                = make_weight(format, shape);
-    const std::vector<float> oracle_weight      = materialize_weight_rows(host_weight, oracle_rows);
+    // The arena is sized per policy over the token range that policy actually executes:
+    // A16Only runs at every token, the AllowA4/AllowA8 replays only at the replay
+    // tokens. Sizing A8 over the full range would over-reserve the arena for shapes
+    // whose largest token never replays.
+    std::int32_t maximum_replay_t = 0;
+    for (const std::int32_t t : tokens) {
+        if (case_replays(format, shape, t)) { maximum_replay_t = std::max(maximum_replay_t, t); }
+    }
+
+    const std::vector<std::int32_t> oracle_rows =
+        shape.full_output ? all_indices(shape.n) : sampled_indices(shape.n);
+    const QType qtype                      = qtype_for(format);
+    const HostWeight host_weight           = make_weight(format, shape);
+    const std::vector<float> oracle_weight = materialize_weight_rows(host_weight, oracle_rows);
     const std::vector<std::uint16_t> activation =
         make_activation(shape.k, maximum_t, shape.seed + 1U);
     const std::vector<std::uint16_t> residual = make_residual(shape.n, maximum_t, shape.seed + 2U);
@@ -313,8 +371,25 @@ int run_shape(std::string_view label, WeightFormat format, const ShapeCase& shap
     device_weight.copy_from_host(host_payload.data(), host_payload.size());
     const Weight weight = make_device_weight_view(host_weight, device_weight.data());
 
-    const std::size_t workspace_bytes =
+    // Size the arena for the policies the cases execute: A16Only over the full token
+    // range, plus AllowA4/AllowA8 over the replay-token range when any case replays.
+    // Sizing the replay policies over the full range would over-reserve the arena for
+    // shapes whose largest token never replays, which the high-water witness check
+    // below would then reject.
+    std::size_t workspace_bytes =
         ops::linear_add_workspace_capacity_bytes(qtype, shape.n, shape.k, 1, maximum_t);
+    if (maximum_replay_t > 0) {
+        workspace_bytes = std::max(
+            workspace_bytes,
+            ops::linear_add_workspace_capacity_bytes(qtype, shape.n, shape.k,
+                                                     ops::LinearPolicy::AllowA4, 1,
+                                                     maximum_replay_t));
+        workspace_bytes = std::max(
+            workspace_bytes,
+            ops::linear_add_workspace_capacity_bytes(qtype, shape.n, shape.k,
+                                                     ops::LinearPolicy::AllowA8, 1,
+                                                     maximum_replay_t));
+    }
     WorkspaceArena workspace(std::max<std::size_t>(workspace_bytes, 256));
 
     int failures              = 0;
@@ -331,51 +406,85 @@ int run_shape(std::string_view label, WeightFormat format, const ShapeCase& shap
 
         const std::string case_label = std::string(label) + " [" + std::to_string(shape.n) + "," +
                                        std::to_string(shape.k) + "] T=" + std::to_string(t);
+        const auto verify_result = [&] {
+            failures += output.verify_guards(case_label.c_str());
+            const std::vector<std::int32_t> columns = all_indices(t);
+            const OutputRead actual =
+                read_output(output.data(), shape.n, t, oracle_rows, columns, case_label);
+            failures += actual.failures;
+            failures +=
+                compare_output(case_label, actual.selected,
+                               std::span<const double>(
+                                   full_reference.data(),
+                                   checked_elements(static_cast<std::int32_t>(oracle_rows.size()),
+                                                    t, "reference")));
+        };
         try {
             ops::linear_add(input, weight, residual_out, workspace, nullptr);
             test::cuda_check(cudaDeviceSynchronize(), "synchronize linear_add");
-            if (t == 128 && format == WeightFormat::Q5G64F16S) {
+            verify_result();
+            if (case_replays(format, shape, t)) {
                 cudaStream_t stream;
                 cudaGraph_t graph;
                 cudaGraphExec_t executable;
                 CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
                 CUDA_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
-                ops::linear_add(input, weight, residual_out, workspace, stream);
+                ops::linear_add(input, weight, residual_out, ops::LinearPolicy::AllowA4, workspace,
+                                stream);
                 CUDA_CHECK(cudaStreamEndCapture(stream, &graph));
                 CUDA_CHECK(cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0));
-                for (int replay = 0; replay < 2; ++replay) {
+                for (int replay = 0; replay < 3; ++replay) {
+                    if (replay == 1) {
+                        CUDA_CHECK(cudaMemsetAsync(input.data, 0, input.bytes(), stream));
+                    } else {
+                        CUDA_CHECK(cudaMemcpyAsync(input.data, activation.data(), input.bytes(),
+                                                   cudaMemcpyHostToDevice, stream));
+                    }
                     CUDA_CHECK(cudaMemcpyAsync(output.data(), residual.data(), output.bytes(),
-                        cudaMemcpyHostToDevice, stream));
+                                               cudaMemcpyHostToDevice, stream));
                     CUDA_CHECK(cudaGraphLaunch(executable, stream));
                     CUDA_CHECK(cudaStreamSynchronize(stream));
+                    if (replay != 1) { verify_result(); }
+                    if (replay == 1) {
+                        // For X=0, the independent mathematical result is the original residual.
+                        std::vector<std::uint16_t> actual(output_words);
+                        output.copy_to_host(actual.data(), output.bytes());
+                        for (std::size_t index = 0; index < actual.size(); ++index) {
+                            if (test::bf16_to_f32(actual[index]) !=
+                                test::bf16_to_f32(residual[index])) {
+                                std::cerr << case_label
+                                          << ": graph reused stale activation or residual\n";
+                                ++failures;
+                                break;
+                            }
+                        }
+                    }
                 }
                 CUDA_CHECK(cudaGraphExecDestroy(executable));
                 CUDA_CHECK(cudaGraphDestroy(graph));
                 CUDA_CHECK(cudaStreamDestroy(stream));
+                output.copy_from_host(residual.data(), output.bytes());
+                ops::linear_add(input, weight, residual_out, ops::LinearPolicy::AllowA8, workspace,
+                                nullptr);
+                test::cuda_check(cudaDeviceSynchronize(), "synchronize permissive A16 linear_add");
+                verify_result();
             }
         } catch (const std::exception& error) {
             std::cerr << case_label << ": unexpected exception: " << error.what() << '\n';
             ++failures;
             continue;
         }
+        // The case's high water mark spans every policy it dispatched: A16Only always,
+        // plus AllowA4/AllowA8 when it ran the replays. Compare against the capacity
+        // those policies report for this exact token count.
         const std::size_t exact_workspace =
-            ops::linear_add_workspace_capacity_bytes(qtype, shape.n, shape.k, t, t);
+            policies_workspace_bytes(qtype, shape.n, shape.k, t, t,
+                                     case_replays(format, shape, t));
         if (workspace.used() != 0 || workspace.peak_used() != exact_workspace) {
             std::cerr << case_label << ": exact workspace query/execution high-water mismatch\n";
             ++failures;
         }
         executed_peak = std::max(executed_peak, workspace.peak_used());
-
-        failures += output.verify_guards(case_label.c_str());
-        const std::vector<std::int32_t> columns = all_indices(t);
-        const OutputRead actual =
-            read_output(output.data(), shape.n, t, oracle_rows, columns, case_label);
-        failures += actual.failures;
-        failures += compare_output(
-            case_label, actual.selected,
-            std::span<const double>(
-                full_reference.data(),
-                checked_elements(static_cast<std::int32_t>(oracle_rows.size()), t, "reference")));
     }
     if (executed_peak != workspace_bytes) {
         std::cerr << label << ": interval workspace capacity has no executed high-water witness\n";

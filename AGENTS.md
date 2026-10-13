@@ -16,9 +16,20 @@ uncertainty, or checks a realistic regression. A necessary redesign is in scope;
 hardening, compatibility, and benchmark campaigns are not. Address incidental findings when they
 block the outcome or are inseparable from the selected implementation.
 
+For implementation tasks, record the user's requirements, promised work, affected implementations
+and routes, and the quality dimensions to be evaluated before judging results. For comparative
+claims, also identify the baseline, workloads, metrics, aggregation method, and acceptance criteria.
+Keep this accounting current as the task develops. Explain justified changes and preserve the
+earlier findings; never narrow the scope or change the criteria after seeing unfavorable results
+to make the task appear successful. This accounting may live in the working conversation or
+existing task artifacts; it does not require a new permanent planning document.
+
 For analysis or design, deliver the explanation or design. For diagnosis, establish the cause and
 supporting evidence; implement a fix when requested. For implementation, complete the selected
 design across its affected implementations, callers, tests, tools, and active documentation.
+
+Requests for analysis or proposals for review do not authorize applying them;
+implementation authorization must cover that same scope.
 
 The current product and architecture govern ordinary work. An explicit task may change them;
 update the affected contracts and implementation together instead of treating the current design
@@ -27,36 +38,42 @@ approval requirements beyond the user's instructions and the actual execution en
 
 ## Product and architecture
 
-NInfer is a from-scratch C++/CUDA inference engine for maximum single-GPU performance on explicitly
-registered artifacts. Current identities are `qwen3.6-27b/groupwise-int`, `qwen3.6-27b/nvfp4`,
-`qwen3.8-27b/groupwise-int`, `qwen3.8-27b/nvfp4`, and `qwen3.6-35b-a3b/groupwise-int`.
-The implementation targets `sm_120a` and is tuned on NVIDIA GeForce RTX 5090.
+NInfer is a from-scratch C++/CUDA inference engine for maximum single-GPU performance. It implements
+`Qwen3_5ForCausalLM` and `Qwen3_5MoeForCausalLM`; official Qwen3.6/3.8 artifacts and user recipes
+use the same architecture, binding and execution path. The implementation targets `sm_120a` and
+is tuned on NVIDIA GeForce RTX 5090.
 
 Generation uses one GPU, one resident model, startup-fixed concurrency of one to eight requests,
 bounded FIFO ingress, no active-request preemption, and one compact decode batch per round.
 Generation and offline CausalScoring use the same public `.ninfer` Engine route. Delivered
 capabilities and commands are documented in `README.md`, the product guides, and executable
-`--help`. Additional models, execution platforms, large-scale/preemptive continuous batching, and
-priority/QoS require an explicit product change.
+`--help`. New mathematical architectures, execution platforms, large-scale/preemptive continuous
+batching, and priority/QoS require an explicit product change. Another training instance or mixture
+of existing representations does not require a checkpoint-specific execution registration.
 
-This is a local, single-owner project with trusted registered models, generated artifacts, and
+This is a local, single-owner project with trusted local models, generated artifacts, and
 local workflow. Do not derive requirements from a different deployment or trust model.
 
 Keep these ownership boundaries visible when selecting a design:
 
-- `.ninfer` is the only C++ product artifact; CLI, serving, and inference benchmarks use the public
+- v3 `.ninfer` is the only C++ product artifact; CLI, serving, and inference benchmarks use the public
   Engine. NInfer has no Python model-inference route or installed/exported C++ SDK.
 - Core owns physical primitives and raw transfers; artifact owns generic framing and
   materialization; Ops own closed mathematical and state-transition implementations.
-- The Qwen3.6 family owns shared frontend semantics and compile-time planning/Program algorithms.
-  The 27B and 35B-A3B packages are peer Variants owning their identities, bindings, execution leaves,
-  and Program instance storage. Programs share no mutable state or device allocation.
+- Models own fixed mathematics, config interpretation, logical parameter binding, frontend
+  semantics and finite execution composition. Immutable Model data owns selected weights and
+  resources; native Parameters supply the actual operands to planning and Program execution.
+  Program owns mutable state, workspace, context stores and CUDA Graphs. Programs share no mutable
+  state or device allocation.
+- Converter recipes choose sources, formats, packing and per-input activation permissions. The
+  loader validates, uploads and binds the stored representation. Native preparation, resource
+  queries and execution enforce actual Op support; there is no whole-artifact capability registry.
 - Runtime owns common execution contracts and Engine publication policy; product/serving own input
-  acquisition and protocol translation. Target packages do not acquire media or own transport.
+  acquisition and protocol translation. Model code does not acquire media or own transport.
 
-Detailed family/package responsibilities and source ownership are defined in
+Detailed model/runtime responsibilities and source ownership are defined in
 [Engine architecture](docs/maintainer/engine-architecture.md). Read the relevant boundary before
-changing it. Prefer explicit implementations for registered targets. Do not introduce generic model
+changing it. Prefer explicit implementations for supported architectures. Do not introduce generic model
 graphs, family base classes, plugin discovery, string-driven execution, hidden device allocation,
 runtime weight repacking, or placeholders for hypothetical targets without a product requirement.
 
@@ -112,10 +129,40 @@ inventories, and exact probabilistic outputs are not default requirements. Use e
 exact outputs, and appropriate numerical or behavioral criteria otherwise. State checks that could
 not run and their implications.
 
-Finish when the deliverable is usable, applicable contracts are satisfied, material claims have
-sufficient evidence, relevant checks pass or their limitations are clear, and no known in-scope
-issue blocks use. Expand or repeat verification only for new changes, failures, or unresolved risks
-that could change the result. Supporting work is not an independent completion objective.
+## Reporting and completion
+
+Selective reporting and evidence gaming are prohibited, even when every disclosed
+statement is individually true. For every implementation task:
+
+1. Cover the entire agreed deliverable, its completion status, and all affected or
+   evaluated dimensions: behavior, numerical semantics, interfaces, architecture,
+   performance, resources, and maintenance. Distinguish completed, incomplete, and
+   unverified work; never describe an unmeasured aspect as unchanged.
+
+2. Put favorable and unfavorable findings in the final reply itself, including
+   regressions, costs, rejected approaches, failures subsequently fixed, unresolved
+   issues, and verification gaps. Explain their disposition. Group repetition
+   without hiding distinct problems or exceptions. Small or unexplained adverse
+   results must remain visible; attachments cannot substitute for disclosure.
+
+3. Make comparisons representative and comparable. State the baseline, workload,
+   conditions, metrics, coverage, outcome distribution, worst changes, and exceptions.
+   Distinguish new capability, fallback replacement, and improvement to an optimized
+   implementation. Keep claims within the measured scope; neither a best case nor
+   an average may stand in for the full results.
+
+4. Apply the same evidence standard to gains and regressions. Label uncertainty;
+   do not dismiss slowdowns as noise without evidence. Explain changes to scope,
+   baselines, methods, or acceptance criteria and preserve earlier adverse findings.
+   Never change these choices to manufacture a favorable conclusion.
+
+5. Reuse sufficient evidence. Additional or repeated checks must satisfy required
+   verification, replace invalidated evidence, or resolve a concrete question that
+   could change implementation or acceptance. Once the deliverable and acceptance
+   conditions are satisfied, stop and report. Report review checks existing work
+   and findings; it must not become a new audit, sweep, or reporting-tool project.
+   Disclose remaining uncertainty without silently making it a new requirement.
+   Disclosure does not excuse unmet completion conditions.
 
 ## Reference navigation
 
@@ -124,9 +171,9 @@ Read the authority relevant to the current decision; this is not a mandatory rea
 | Decision | Entry point |
 |---|---|
 | Product capabilities and exact commands | `README.md`, executable `--help`; `docs/cli.md`, `docs/serving.md`, `docs/perplexity.md` |
-| Execution, family/package ownership, scheduling, transactions, graphs | `docs/maintainer/engine-architecture.md` |
+| Execution, model/runtime ownership, scheduling, transactions, graphs | `docs/maintainer/engine-architecture.md` |
 | Context resources, checkpoints, replicas; physical KV | `docs/maintainer/resource-scheduling-and-context-cache.md`; `docs/maintainer/paged-kv-cache.md` |
-| Artifact, layout, codec, or exact target mathematics | model/artifact references linked from `docs/README.md` |
+| Artifact, layout, codec, conversion, or model mathematics | model/artifact references and conversion guide linked from `docs/README.md` |
 | Op contracts, implementation ownership, numerical/performance qualification | `docs/maintainer/op-development.md` |
 | Test/benchmark commands and published performance | `tests/README.md`, `bench/README.md`, `docs/performance.md` |
 | In-tree C++ interface | `include/ninfer/engine.h`, `include/ninfer/types.h` |

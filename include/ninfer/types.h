@@ -167,6 +167,7 @@ struct ContextCostOptions {
 
 struct EngineOptions {
     std::filesystem::path artifact_path;
+    std::filesystem::path chat_template_path;
     EnginePurpose purpose              = EnginePurpose::Generation;
     int device                         = 0;
     std::uint32_t max_context          = 2048; // Logical ceiling of one request or score window.
@@ -287,6 +288,8 @@ struct OutputOptions {
     // Presentation constraint supplied by the protocol adapter. It bounds only Qwen's emitted
     // function-name grammar; it does not require the name to match a currently declared tool.
     std::uint32_t tool_name_max_length = 128;
+    // Recover complete tool calls from output the strict Qwen parser would return as text.
+    bool tolerant_tool_calls = false;
 };
 
 struct RequestOptions {
@@ -362,6 +365,9 @@ struct ToolCallParseDiagnostics {
     std::uint32_t empty_arguments_omitted       = 0;
     std::uint32_t schema_mismatch_arguments     = 0;
     ToolCallParseFallbackReason fallback_reason = ToolCallParseFallbackReason::None;
+    // Tolerant mode only: the strict-parse failure that recovery overcame (None if the strict
+    // parse succeeded or recovery did not run).
+    ToolCallParseFallbackReason recovered_from = ToolCallParseFallbackReason::None;
 
     [[nodiscard]] friend constexpr bool
     operator==(const ToolCallParseDiagnostics&, const ToolCallParseDiagnostics&) noexcept = default;
@@ -397,34 +403,34 @@ struct ChatMessage {
 };
 
 enum class ReasoningEffort : std::uint8_t {
+    None,
+    Minimal,
     Low,
     Medium,
+    High,
     XHigh,
+    Max,
 };
 
-struct ReasoningEffortCapabilities {
-    bool low    = false;
-    bool medium = false;
-    bool xhigh  = false;
-    std::optional<ReasoningEffort> default_effort;
-
-    [[nodiscard]] constexpr bool supports(ReasoningEffort effort) const noexcept {
-        switch (effort) {
-        case ReasoningEffort::Low:
-            return low;
-        case ReasoningEffort::Medium:
-            return medium;
-        case ReasoningEffort::XHigh:
-            return xhigh;
-        }
-        return false;
+[[nodiscard]] constexpr std::string_view reasoning_effort_name(ReasoningEffort effort) noexcept {
+    switch (effort) {
+    case ReasoningEffort::None:
+        return "none";
+    case ReasoningEffort::Minimal:
+        return "minimal";
+    case ReasoningEffort::Low:
+        return "low";
+    case ReasoningEffort::Medium:
+        return "medium";
+    case ReasoningEffort::High:
+        return "high";
+    case ReasoningEffort::XHigh:
+        return "xhigh";
+    case ReasoningEffort::Max:
+        return "max";
     }
-};
-
-struct PromptCapabilities {
-    bool enable_thinking = false;
-    ReasoningEffortCapabilities reasoning_effort;
-};
+    return {};
+}
 
 enum class PromptContinuationMode : std::uint8_t {
     NewAssistantTurn,
@@ -433,10 +439,12 @@ enum class PromptContinuationMode : std::uint8_t {
 
 struct PromptOptions {
     PromptContinuationMode continuation = PromptContinuationMode::NewAssistantTurn;
-    bool enable_thinking                = true;
+    std::optional<bool> enable_thinking;
     std::optional<ReasoningEffort> reasoning_effort;
-    bool preserve_thinking = false;
-    bool add_vision_id     = false;
+    std::optional<bool> preserve_thinking;
+    // JSON object of template parameters. Unset typed fields leave template defaults intact.
+    std::string chat_template_kwargs_json;
+    bool add_vision_id = false;
     std::vector<std::string> tool_jsons;
 };
 
@@ -551,6 +559,7 @@ private:
 };
 
 struct PromptSummary {
+    bool starts_in_reasoning    = false;
     std::uint32_t prompt_tokens = 0;
     bool has_media              = false;
 };
@@ -1059,8 +1068,7 @@ struct ContextCostSummary {
     ContextCostPresetSource transfer_source = ContextCostPresetSource::GenericDefault;
     ContextCostPresetSource prefill_source  = ContextCostPresetSource::GenericDefault;
     std::string hardware_class;
-    std::string model_id;
-    std::string weights_id;
+    std::string prefill_signature;
     std::filesystem::path preset_path;
 };
 
@@ -1110,16 +1118,18 @@ public:
 };
 
 struct LoadSummary {
-    std::string target;
-    std::string model_id;
-    std::string weights_id;
+    std::string architecture;
+    std::string model_name;
+    std::string cuda_sync_mode;
+    std::vector<std::string> weight_formats;
+    std::string prefill_signature;
     double load_seconds                = 0.0;
     double upload_seconds              = 0.0;
     std::uint64_t artifact_bytes_read  = 0;
     std::uint64_t host_to_device_bytes = 0;
     std::uint64_t peak_staging_bytes   = 0;
-    std::size_t tensor_count           = 0;
-    std::size_t resource_count         = 0;
+    std::size_t device_object_count    = 0;
+    std::size_t host_object_count      = 0;
     ContextCostSummary context_cost;
 };
 

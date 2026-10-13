@@ -104,18 +104,10 @@ const char* prefix_reuse_path_name(ninfer::PrefixReusePath path) noexcept {
     return "unknown";
 }
 
-const char* resolved_reasoning_effort_name(const RequestLogContext& context) noexcept {
-    if (!context.enable_thinking) { return "none"; }
-    if (!context.resolved_reasoning_effort) { return "on"; }
-    switch (*context.resolved_reasoning_effort) {
-    case ninfer::ReasoningEffort::Low:
-        return "low";
-    case ninfer::ReasoningEffort::Medium:
-        return "medium";
-    case ninfer::ReasoningEffort::XHigh:
-        return "xhigh";
-    }
-    return "unknown";
+std::string_view requested_effort_name(const RequestLogContext& context) noexcept {
+    if (context.requested_reasoning_effort)
+        return requested_reasoning_effort_name(*context.requested_reasoning_effort);
+    return "template default";
 }
 
 const char* protocol_name(std::string_view protocol) noexcept {
@@ -139,6 +131,14 @@ const char* kv_cache_name(ninfer::KvCacheStorage storage) noexcept {
         return "nvfp4";
     case ninfer::KvCacheStorage::Fp8KeyNvfp4Value:
         return "k8v4";
+    case ninfer::KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
+        return "rk8v4";
+    case ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueGroup64:
+        return "rk4v4";
+    case ninfer::KvCacheStorage::RK4V4E8:
+        return "rk4v4-e8";
+    case ninfer::KvCacheStorage::RK2V4E8:
+        return "rk2v4-e8";
     }
     return "unknown";
 }
@@ -196,7 +196,7 @@ OperationalRecord render_request_start(const RequestLogContext& context) {
                static_cast<std::uint64_t>(std::max(context.requested_output_tokens, 0)));
     out << " | thinking ";
     if (context.enable_thinking) {
-        out << resolved_reasoning_effort_name(context);
+        out << requested_effort_name(context);
         if (context.thinking_budget) {
             out << ", budget " << product::format_pretty_count(*context.thinking_budget);
         }
@@ -210,7 +210,7 @@ OperationalRecord render_request_start(const RequestLogContext& context) {
         }
     }
     if (context.tool_count != 0) { append_counted_clause(out, "tools", context.tool_count); }
-    if (context.preserve_thinking) { append_clause(out, "preserve thinking"); }
+    if (context.preserve_thinking == true) { append_clause(out, "preserve thinking"); }
     return {.severity = OperationalSeverity::Info, .message = out.str()};
 }
 
@@ -463,11 +463,12 @@ void OperationalLog::engine_capacity(const GenerationService& service) const {
     if (cache.enabled) {
         logger_->info(
             "context cache | {} active + {} cached device states | host {} states, {} KV | "
-            "private {} | shared {} | anchors {}",
+            "private {} | shared {} | anchors {} auto {}",
             engine.max_concurrency, *cache.device_state_slots, cache.host_state_slots,
             product::format_pretty_bytes(cache.host_kv_capacity_bytes),
             *cache.max_private_continuations, *cache.max_shared_prefixes,
-            *cache.max_long_anchors_per_continuation);
+            *cache.max_long_anchors_per_continuation,
+            service.automatic_private_anchors());
     } else {
         logger_->info("context cache | root only");
     }
@@ -486,12 +487,11 @@ void OperationalLog::engine_capacity(const GenerationService& service) const {
                    product::format_pretty_bytes(memory.kv_capacity_headroom_bytes),
                    product::format_pretty_bytes(memory.planned_slack_bytes),
                    product::format_pretty_bytes(memory.cuda_graph_allowance_bytes));
-    logger_->debug("context cost | transfer {} | prefill {} | profile {}/{}/{}",
+    logger_->debug("context cost | transfer {} | prefill {} | hardware {} | prefill signature {}",
                    ninfer::context_cost_preset_source_name(context_cost.transfer_source),
                    ninfer::context_cost_preset_source_name(context_cost.prefill_source),
                    product::format_pretty_text(context_cost.hardware_class),
-                   product::format_pretty_text(context_cost.model_id),
-                   product::format_pretty_text(context_cost.weights_id));
+                   product::format_pretty_text(context_cost.prefill_signature));
 }
 
 void OperationalLog::warmup_started() const { logger_->debug("warming up"); }

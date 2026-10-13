@@ -1,3 +1,4 @@
+#include "core/weight.h"
 #include "ninfer/ops/linear.h"
 
 #include "core/decode_graph.h"
@@ -88,12 +89,12 @@ std::vector<std::int32_t> sampled_tokens(std::int32_t tokens) {
     return result;
 }
 
-int run_bf16_linear_case(DeviceWeight& weight, std::int32_t tokens) {
-    const std::int32_t rows                          = weight.host.n;
-    const std::int32_t hidden                        = weight.host.k;
-    const std::vector<std::uint16_t> activation_bits = make_activation_bits(hidden, tokens);
-    const std::vector<float> activation              = materialize(activation_bits);
-    DeviceBuffer device_activation                   = to_device(activation_bits);
+int run_bf16_linear_case(DeviceWeight& weight, std::int32_t tokens, bool replay = false) {
+    const std::int32_t rows                    = weight.host.n;
+    const std::int32_t hidden                  = weight.host.k;
+    std::vector<std::uint16_t> activation_bits = make_activation_bits(hidden, tokens);
+    std::vector<float> activation              = materialize(activation_bits);
+    DeviceBuffer device_activation             = to_device(activation_bits);
     GuardedDeviceBuffer guarded_output(static_cast<std::size_t>(rows) * tokens *
                                        sizeof(std::uint16_t));
     guarded_output.fill(0xff);
@@ -104,7 +105,26 @@ int run_bf16_linear_case(DeviceWeight& weight, std::int32_t tokens) {
     ops::linear(x, weight.view(), output, ops::LinearPolicy::A16Only, workspace, nullptr);
     cuda_synchronize();
 
-    const std::string suffix = " T=" + std::to_string(tokens);
+    if (replay) {
+        DeviceContext context;
+        DecodeGraphDefinition definition;
+        DecodeGraphExecutable graph;
+        definition.capture(context.stream, [&] {
+            ops::linear(x, weight.view(), output, ops::LinearPolicy::A16Only, workspace,
+                        context.stream);
+        });
+        graph.instantiate(definition);
+        graph.launch(context.stream);
+        cuda_synchronize();
+        for (auto& bits : activation_bits) bits ^= 0x8000;
+        activation = materialize(activation_bits);
+        device_activation.copy_from_host(activation_bits.data(), device_activation.bytes);
+        guarded_output.fill(0xff);
+        cuda_synchronize();
+        graph.launch(context.stream);
+        cuda_synchronize();
+    }
+    const std::string suffix = " T=" + std::to_string(tokens) + (replay ? " graph" : " eager");
     int failures             = guarded_output.verify_guards("BF16_A16 Linear output" + suffix);
     const std::vector<std::uint16_t> output_bits =
         from_device<std::uint16_t>(guarded_output.data(), static_cast<std::size_t>(rows) * tokens);
@@ -156,7 +176,7 @@ int run_bf16_linear_case(DeviceWeight& weight, std::int32_t tokens) {
 }
 
 int run_selector_linear() {
-    constexpr int n = 256, k = 5120, max_t = 1024;
+    constexpr int n = 256, k = 5120, max_t = 2048;
     DeviceWeight weight(make_patterned(n, k, 419U));
     const auto bits       = make_activation_bits(k, max_t);
     const auto activation = materialize(bits);
@@ -179,7 +199,7 @@ int run_selector_linear() {
     int failures   = 0;
     const auto run = [&](int tokens, bool replay) {
         const auto capacity = ops::linear_workspace_capacity_bytes(
-            QType::BF16_CTRL, n, k, ops::LinearPolicy::A16Only, tokens, tokens);
+            QType::BF16, n, k, ops::LinearPolicy::A16Only, tokens, tokens);
         DeviceArena scratch(std::max<std::size_t>(capacity, 256));
         GuardedDeviceBuffer output_buffer(static_cast<std::size_t>(n) * tokens * 2);
         Tensor x(input.p, DType::BF16, {k, tokens});
@@ -227,8 +247,11 @@ int run_selector_linear() {
         if (replay) input.copy_from_host(bits.data(), input.bytes);
     };
     for (int tokens = 1; tokens <= 120; ++tokens) run(tokens, false);
-    for (int tokens : {121, 127, 128, 129, 256, 1024}) run(tokens, false);
-    for (int tokens : {1, 7, 8, 15, 16, 63, 64, 65, 76, 77, 80, 81, 119, 120, 129, 1024})
+    for (int tokens : {121, 127, 128,  129,  159,  160,  161,  162,  256,  639,  640,
+                       641, 642, 1023, 1024, 1025, 1026, 1279, 1280, 1281, 1282, 2048})
+        run(tokens, false);
+    for (int tokens : {1,   7,   8,   15,  16,  63,  64,  65,   76,   77,   80,   81,
+                       119, 120, 129, 160, 161, 640, 641, 1024, 1025, 1280, 1281, 2048})
         run(tokens, true);
     failures += weight.verify_preserved("BF16 selector weight");
     return failures;
@@ -237,12 +260,18 @@ int run_selector_linear() {
 int run_bf16_linear() {
     int failures = 0;
     DeviceWeight attention_weight(make_patterned(14336, 5120, 401U));
-    for (const std::int32_t tokens : {1, 2, 4, 8, 16, 17, 27, 28, 32, 33, 128, 129, 1024}) {
-        failures += run_bf16_linear_case(attention_weight, tokens);
-    }
     DeviceWeight output_weight(make_patterned(5120, 6144, 409U));
-    for (const std::int32_t tokens : {1, 2, 4, 8, 16, 27, 28, 32, 33, 127, 128, 129, 1024, 1536}) {
-        failures += run_bf16_linear_case(output_weight, tokens);
+    for (DeviceWeight* weight : {&attention_weight, &output_weight}) {
+        for (int tokens = 1; tokens <= 33; ++tokens) {
+            failures += run_bf16_linear_case(*weight, tokens);
+        }
+        for (int tokens :
+             {63, 64, 65, 66, 95, 96, 97, 98, 127, 128, 129, 130, 191, 192, 193, 194, 1024, 1536}) {
+            failures += run_bf16_linear_case(*weight, tokens);
+        }
+        for (int tokens : {3, 7, 13, 19, 23, 25, 29, 33, 64, 65, 97, 129, 193}) {
+            failures += run_bf16_linear_case(*weight, tokens, true);
+        }
     }
     failures += run_selector_linear();
     return failures;

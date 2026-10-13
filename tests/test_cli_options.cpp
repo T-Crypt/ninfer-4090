@@ -85,9 +85,14 @@ int main() {
     failures += check(k8v4.kv_cache == ninfer::KvCacheStorage::Fp8KeyNvfp4Value,
                       "--kv-dtype k8v4 did not select asymmetric K8V4 KV");
     const std::string help = ninfer::cli::usage_text("ninfer-cli");
-    failures +=
-        check(help.find("nvfp4") != std::string::npos && help.find("k8v4") != std::string::npos,
-              "CLI help omits a production KV storage mode");
+    // sm_89 production KV modes; nvfp4/k8v4 still parse but are refused at startup on Ada.
+    failures += check(help.find("rk4v4-e8") != std::string::npos &&
+                          help.find("int8") != std::string::npos,
+                      "CLI help omits a production KV storage mode");
+    const ninfer::cli::Options e8 =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-dtype", "rk4v4-e8"});
+    failures += check(e8.kv_cache == ninfer::KvCacheStorage::RK4V4E8,
+                      "--kv-dtype rk4v4-e8 did not select RK4V4 E8 KV");
     const ninfer::cli::Options logging =
         parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--log-level", "debug"});
     failures += check(logging.log_level == ninfer::product::LogLevel::Debug,

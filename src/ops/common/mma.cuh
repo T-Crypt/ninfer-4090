@@ -67,6 +67,12 @@ __device__ __forceinline__ void mma_s8(int& c0, int& c1, int& c2, int& c3, unsig
                  : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
 }
 
+// sm_89 port (KKCF9MR stage 2): upstream's block-scaled form exists to get full-rate
+// accumulation on Blackwell (sm_120a); ptxas rejects it below sm_90. Upstream passes unit
+// scales (UE8M0 0x7f = 1.0) and keeps the real row scales in FP32 in the callers, so the
+// plain sm_89 form computes the same E4M3 dot product with the same f32 accumulation.
+// f32 accumulation is half-rate on sm_89; revisit (f16 accumulation with periodic
+// promotion) only if the stage-6 bench shows it matters.
 __device__ __forceinline__ void mma_fp8_e4m3(float& c0, float& c1, float& c2, float& c3,
                                              unsigned a0, unsigned a1, unsigned a2, unsigned a3,
                                              unsigned b0, unsigned b1) {

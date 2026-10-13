@@ -2,6 +2,7 @@
 // positions then launch causal attention over absolute cached history.
 #include "ops/softmax_attention/dense/causal_cache/launch.h"
 
+#include "core/paged_kv_storage.h"
 #include "ops/common/math.h"
 #include "ops/kv_cache/append/launch.h"
 #include "ops/softmax_attention/dense/causal_cache/prompt_bf16.cuh"
@@ -9,6 +10,7 @@
 #include "core/device.h" // CUDA_CHECK
 
 #include <cstdint>
+#include <stdexcept>
 
 namespace ninfer::ops::detail {
 namespace {
@@ -85,17 +87,10 @@ void causal_attention_prompt_attention_launch_for(const Tensor& q, const Tensor&
 void causal_attention_prompt_attention_launch(const Tensor& q, const Tensor& positions, float scale,
                                               const PagedKVLayerView& cache, Tensor& out,
                                               cudaStream_t stream) {
-    if (cache.storage == KvCacheStorage::Fp8KeyNvfp4Value) {
-        causal_attention_prompt_k8v4_attention_launch(q, positions, scale, cache, out, stream);
-        return;
-    }
-    if (cache.storage == KvCacheStorage::Nvfp4Group16) {
-        causal_attention_prompt_nvfp4_attention_launch(q, positions, scale, cache, out, stream);
-        return;
-    }
-    if (cache.storage == KvCacheStorage::Fp8E4M3Row256) {
-        causal_attention_prompt_fp8_attention_launch(q, positions, scale, cache, out, stream);
-        return;
+    // v3 port: upstream storages run their own families in causal_softmax_attention.cpp; this
+    // generic launcher serves BF16 and the int8 family (fork rotated/packed/E8 storages) only.
+    if (cache.storage != KvCacheStorage::BFloat16 && !kv_storage_is_int8_family(cache.storage)) {
+        throw std::invalid_argument("causal_attention_prompt_attention_launch: storage is not served by the generic launcher");
     }
     const PagedKVDirectMetadata metadata{static_cast<const std::int32_t*>(cache.block_table.data)};
     if (q.ne[1] == CausalD256H24Kv4::QHeads) {
@@ -111,20 +106,10 @@ void causal_attention_prompt_launch(const Tensor& q, const Tensor& k, const Tens
                                     const Tensor& positions, const Tensor& valid_columns,
                                     const Tensor& table_rows, float scale,
                                     PagedKVBatchLayerView cache, Tensor& out, cudaStream_t stream) {
-    if (cache.storage == KvCacheStorage::Fp8KeyNvfp4Value) {
-        causal_attention_prompt_k8v4_launch(q, k, v, positions, valid_columns, table_rows, scale,
-                                            cache, out, stream);
-        return;
-    }
-    if (cache.storage == KvCacheStorage::Nvfp4Group16) {
-        causal_attention_prompt_nvfp4_launch(q, k, v, positions, valid_columns, table_rows, scale,
-                                             cache, out, stream);
-        return;
-    }
-    if (cache.storage == KvCacheStorage::Fp8E4M3Row256) {
-        causal_attention_prompt_fp8_launch(q, k, v, positions, valid_columns, table_rows, scale,
-                                           cache, out, stream);
-        return;
+    // v3 port: upstream storages run their own families in causal_softmax_attention.cpp; this
+    // generic launcher serves BF16 and the int8 family (fork rotated/packed/E8 storages) only.
+    if (cache.storage != KvCacheStorage::BFloat16 && !kv_storage_is_int8_family(cache.storage)) {
+        throw std::invalid_argument("causal_attention_prompt_launch: storage is not served by the generic launcher");
     }
     kv_cache_append_batch_launch(k, v, positions, valid_columns, table_rows, cache, stream);
     const auto launch = [&]<bool Masked>() {

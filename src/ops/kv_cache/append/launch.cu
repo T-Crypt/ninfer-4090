@@ -51,7 +51,77 @@ void launch_full(const Tensor& k, const Tensor& v, const Tensor& positions, Cach
         CUDA_CHECK(cudaGetLastError());
         return;
     }
+    if (cache.storage == KvCacheStorage::Int8Group64) {
+        // Pre-carry upstream semantics: the Int8Group64 single-request append must run the
+        // upstream int8 kernels (normalized Hadamard on the key plane, per-token physical
+        // page lookups). The fork's storage-mode template below only serves the fork
+        // storages; its plain (all-false) path quantizes an unrotated key plane and would
+        // emit different codes/scales for this storage.
+        Tensor& cache_k_scale = cache.k_scale_pages;
+        Tensor& cache_v_scale = cache.v_scale_pages;
+        const auto launch_fill = [&]<bool PackedV, bool RotateK, bool RotateV, bool PackedK,
+                                     bool E8Lattice, bool E8Root>() {
+            if (tokens >= 32) {
+                constexpr int TokensPerTile = 8;
+                const int max_tiles = static_cast<int>(div_up(tokens + TokensPerTile, TokensPerTile));
+                const dim3 fill_grid(static_cast<unsigned>(max_tiles),
+                                     static_cast<unsigned>(Geometry::KVHeads),
+                                     static_cast<unsigned>(kKVCacheInt8Groups));
+                kv_cache_append_full_i8_page_kernel<Geometry, PackedV, RotateK, RotateV, PackedK,
+                                                    E8Lattice, E8Root, Metadata>
+                    <<<fill_grid, kBlock, 0, stream>>>(
+                        static_cast<const __nv_bfloat16*>(k.data),
+                        static_cast<const __nv_bfloat16*>(v.data),
+                        static_cast<const std::int32_t*>(positions.data), metadata,
+                        static_cast<std::int8_t*>(cache_k.data),
+                        static_cast<std::uint8_t*>(cache_v.data),
+                        static_cast<__half*>(cache_k_scale.data),
+                        static_cast<__half*>(cache_v_scale.data), tokens);
+            } else {
+                constexpr int FillWarps = kBlock / 32;
+                const std::int64_t fill_units =
+                    static_cast<std::int64_t>(tokens) * Geometry::KVHeads * kKVCacheInt8Groups;
+                const int fill_grid =
+                    static_cast<int>(div_up(fill_units, static_cast<std::int64_t>(FillWarps)));
+                kv_cache_append_full_i8_kernel<Geometry, PackedV, RotateK, RotateV, PackedK,
+                                               E8Lattice, E8Root, Metadata>
+                    <<<fill_grid, kBlock, 0, stream>>>(
+                        static_cast<const __nv_bfloat16*>(k.data),
+                        static_cast<const __nv_bfloat16*>(v.data),
+                        static_cast<const std::int32_t*>(positions.data), metadata,
+                        static_cast<std::int8_t*>(cache_k.data),
+                        static_cast<std::uint8_t*>(cache_v.data),
+                        static_cast<__half*>(cache_k_scale.data),
+                        static_cast<__half*>(cache_v_scale.data), tokens);
+            }
+        };
+        if (mode.e8_root) {
+            launch_fill.template operator()<true, true, true, false, false, true>();
+        } else if (mode.e8_lattice) {
+            launch_fill.template operator()<true, true, true, true, true, false>();
+        } else if (mode.packed_k) {
+            launch_fill.template operator()<true, true, true, true, false, false>();
+        } else if (mode.packed_v) {
+            launch_fill.template operator()<true, true, true, false, false, false>();
+        } else {
+            constexpr int FillWarps = kBlock / 32;
+            const std::int64_t fill_units = static_cast<std::int64_t>(tokens) * Geometry::KVHeads;
+            const int fill_grid =
+                static_cast<int>(div_up(fill_units, static_cast<std::int64_t>(FillWarps)));
+            kv_cache_append_full_i8_kernel<Geometry, Metadata><<<fill_grid, kBlock, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(k.data),
+                static_cast<const __nv_bfloat16*>(v.data),
+                static_cast<const std::int32_t*>(positions.data), metadata,
+                static_cast<std::int8_t*>(cache_k.data), static_cast<std::int8_t*>(cache_v.data),
+                static_cast<__half*>(cache_k_scale.data), static_cast<__half*>(cache_v_scale.data),
+                tokens);
+        }
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
     if (kv_storage_is_int8_family(cache.storage)) {
+        // Fork-local storages (RotatedInt8KeyInt4ValueGroup64, RotatedInt4KeyInt4ValueGroup64,
+        // RK4V4E8, RK2V4E8): storage-mode template kernels.
         const KvForkModeFlags mode = kv_fork_mode_flags(cache.storage);
         Tensor& cache_k_scale = cache.k_scale_pages;
         Tensor& cache_v_scale = cache.v_scale_pages;
@@ -207,6 +277,7 @@ void kv_cache_append_launch(const Tensor& k, const Tensor& v, const Tensor& posi
 void kv_cache_append_batch_launch(const Tensor& k, const Tensor& v, const Tensor& positions,
                                   const Tensor& valid_columns, const Tensor& table_rows,
                                   PagedKVBatchLayerView cache, cudaStream_t stream) {
+#if NINFER_ENABLE_NVFP4_FAMILY
     if (cache.storage == KvCacheStorage::Fp8KeyNvfp4Value) {
         kv_cache_append_k8v4_batch_launch(k, v, positions, valid_columns, table_rows, cache,
                                           stream);
@@ -217,6 +288,16 @@ void kv_cache_append_batch_launch(const Tensor& k, const Tensor& v, const Tensor
                                            stream);
         return;
     }
+#else
+    // NVFP4-family KV storage is Blackwell-only and is not built into this target
+    // (KKCF9MR stage 2). The Ada port serves 4-bit KV through the fork's rk4v4-e8 codec.
+    if (cache.storage == KvCacheStorage::Fp8KeyNvfp4Value ||
+        cache.storage == KvCacheStorage::Nvfp4Group16) {
+        throw std::invalid_argument(
+            "NVFP4-family KV cache storage is Blackwell-only and is not built into this "
+            "target");
+    }
+#endif
     const auto launch = [&]<bool Masked>() {
         const PagedKVBatchMetadata<Masked> metadata{
             .tables = static_cast<const std::int32_t*>(cache.block_tables.data),
@@ -225,6 +306,46 @@ void kv_cache_append_batch_launch(const Tensor& k, const Tensor& v, const Tensor
             .table_rows   = static_cast<const std::int32_t*>(table_rows.data),
             .table_stride = cache.block_tables.ne[0],
         };
+        if (cache.storage == KvCacheStorage::Fp8E4M3Row256 && k.ne[3] > 1) {
+            const auto append = [&]<class Geometry>() {
+                const dim3 grid(div_up(k.ne[2] * Geometry::KVHeads, 8), 1, k.ne[3]);
+                kv_cache_append_full_fp8_batch_kernel<Geometry, Masked>
+                    <<<grid, kBlock, 0, stream>>>(
+                        static_cast<const __nv_bfloat16*>(k.data),
+                        static_cast<const __nv_bfloat16*>(v.data),
+                        static_cast<const std::int32_t*>(positions.data), metadata,
+                        static_cast<std::uint8_t*>(cache.k_pages.data),
+                        static_cast<std::uint8_t*>(cache.v_pages.data),
+                        static_cast<__half*>(cache.k_scale_pages.data),
+                        static_cast<__half*>(cache.v_scale_pages.data), k.ne[2]);
+            };
+            if (k.ne[1] == KVCacheAppendD256Kv4::KVHeads)
+                append.template operator()<KVCacheAppendD256Kv4>();
+            else
+                append.template operator()<KVCacheAppendD256Kv2>();
+            CUDA_CHECK(cudaGetLastError());
+            return;
+        }
+        if (cache.storage == KvCacheStorage::Int8Group64 && k.ne[3] > 1) {
+            const auto append = [&]<class Geometry>() {
+                const dim3 grid(div_up(k.ne[2] * Geometry::KVHeads, 8), 1, k.ne[3]);
+                kv_cache_append_full_i8_kernel<Geometry, PagedKVBatchMetadata<Masked>, true>
+                    <<<grid, kBlock, 0, stream>>>(
+                        static_cast<const __nv_bfloat16*>(k.data),
+                        static_cast<const __nv_bfloat16*>(v.data),
+                        static_cast<const std::int32_t*>(positions.data), metadata,
+                        static_cast<std::int8_t*>(cache.k_pages.data),
+                        static_cast<std::int8_t*>(cache.v_pages.data),
+                        static_cast<__half*>(cache.k_scale_pages.data),
+                        static_cast<__half*>(cache.v_scale_pages.data), k.ne[2]);
+            };
+            if (k.ne[1] == KVCacheAppendD256Kv4::KVHeads)
+                append.template operator()<KVCacheAppendD256Kv4>();
+            else
+                append.template operator()<KVCacheAppendD256Kv2>();
+            CUDA_CHECK(cudaGetLastError());
+            return;
+        }
         if (k.ne[1] == KVCacheAppendD256Kv4::KVHeads) {
             launch_full<KVCacheAppendD256Kv4>(k, v, positions, cache, metadata, stream);
             return;

@@ -5,8 +5,12 @@
 
 #include <spdlog/logger.h>
 
-#include <sys/ioctl.h>
-#include <unistd.h>
+#ifdef _WIN32
+#    include <windows.h>
+#else
+#    include <sys/ioctl.h>
+#    include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -76,9 +80,18 @@ PhasePresentation phase_presentation(StartupPhase phase) noexcept {
 }
 
 std::size_t terminal_columns() noexcept {
+#ifdef _WIN32
+    CONSOLE_SCREEN_BUFFER_INFO info{};
+    if (::GetConsoleScreenBufferInfo(::GetStdHandle(STD_ERROR_HANDLE), &info) != 0 &&
+        info.dwSize.X != 0) {
+        return static_cast<std::size_t>(info.dwSize.X);
+    }
+    return 120;
+#else
     winsize size{};
     if (::ioctl(STDERR_FILENO, TIOCGWINSZ, &size) == 0 && size.ws_col != 0) { return size.ws_col; }
     return 120;
+#endif
 }
 
 std::string progress_bar(double ratio, std::size_t width) {
@@ -200,9 +213,9 @@ struct StartupLogRenderer::Impl {
         case StartupStatus::Begin: {
             const Clock::time_point now = Clock::now();
             phases[index]               = PhaseProgress{
-                              .last_persistent  = now,
-                              .last_interactive = now - kInteractiveRefresh,
-                              .sample_time      = now,
+                .last_persistent  = now,
+                .last_interactive = now - kInteractiveRefresh,
+                .sample_time      = now,
             };
             if (event.phase == StartupPhase::EngineStartup) {
                 logger->info("starting engine");
@@ -286,17 +299,20 @@ void StartupLogRenderer::engine_ready(const LoadSummary& load) {
     const double total_seconds = impl_->engine_elapsed_ns != 0
                                      ? static_cast<double>(impl_->engine_elapsed_ns) * 1.0e-9
                                      : load.load_seconds;
-    impl_->logger->info("engine ready | {}/{} | total {} | weights {}",
-                        format_pretty_text(load.model_id), format_pretty_text(load.weights_id),
-                        format_pretty_duration(total_seconds),
-                        format_pretty_bytes(load.host_to_device_bytes));
+    impl_->logger->info("engine ready | {} | total {} | weights {} | CUDA sync {}",
+                        format_pretty_text(load.model_name), format_pretty_duration(total_seconds),
+                        format_pretty_bytes(load.host_to_device_bytes), load.cuda_sync_mode);
     impl_->logger->debug(
-        "load detail | target {} | artifact read {} | H2D {} | staging peak {} | tensors {} | "
-        "resources {}",
-        format_pretty_text(load.target), format_pretty_bytes(load.artifact_bytes_read),
+        "load detail | architecture {} | artifact read {} | H2D {} | staging peak {} | device "
+        "objects {} | host objects {}",
+        format_pretty_text(load.architecture), format_pretty_bytes(load.artifact_bytes_read),
         format_pretty_bytes(load.host_to_device_bytes),
-        format_pretty_bytes(load.peak_staging_bytes), format_pretty_count(load.tensor_count),
-        format_pretty_count(load.resource_count));
+        format_pretty_bytes(load.peak_staging_bytes), format_pretty_count(load.device_object_count),
+        format_pretty_count(load.host_object_count));
+    impl_->logger->debug("context cost | transfer {} | prefill {} | signature {}",
+                         context_cost_preset_source_name(load.context_cost.transfer_source),
+                         context_cost_preset_source_name(load.context_cost.prefill_source),
+                         load.prefill_signature);
 }
 
 } // namespace ninfer::product

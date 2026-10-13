@@ -56,7 +56,8 @@ std::string usage_text() {
     return "usage: ninfer-perplexity <model.ninfer> "
            "(--corpus <manifest.json> [--quick] | --text <utf8-file>)\n"
            "       [--context N] [--stride N] [--device N]\n"
-           "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--output <directory>]\n"
+           "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8] [--output "
+           "<directory>]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n";
 }
 
@@ -113,8 +114,17 @@ Options parse_options(int argc, char** argv) {
                 out.kv = ninfer::KvCacheStorage::Nvfp4Group16;
             } else if (dtype == "k8v4") {
                 out.kv = ninfer::KvCacheStorage::Fp8KeyNvfp4Value;
+            } else if (dtype == "rk8v4") {
+                out.kv = ninfer::KvCacheStorage::RotatedInt8KeyInt4ValueGroup64;
+            } else if (dtype == "rk4v4") {
+                out.kv = ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueGroup64;
+            } else if (dtype == "rk4v4-e8") {
+                out.kv = ninfer::KvCacheStorage::RK4V4E8;
+            } else if (dtype == "rk2v4-e8") {
+                out.kv = ninfer::KvCacheStorage::RK2V4E8;
             } else {
-                usage_error("--kv-dtype must be bf16, int8, fp8, nvfp4, or k8v4");
+                usage_error("--kv-dtype must be bf16, int8, fp8, rk8v4, rk4v4, rk4v4-e8, rk2v4-e8, "
+                            "nvfp4, or k8v4");
             }
         } else if (option == "--output") {
             out.output = std::filesystem::path(value("--output"));
@@ -146,6 +156,14 @@ std::string kv_name(ninfer::KvCacheStorage value) {
         return "nvfp4";
     case ninfer::KvCacheStorage::Fp8KeyNvfp4Value:
         return "k8v4";
+    case ninfer::KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
+        return "rk8v4";
+    case ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueGroup64:
+        return "rk4v4";
+    case ninfer::KvCacheStorage::RK4V4E8:
+        return "rk4v4-e8";
+    case ninfer::KvCacheStorage::RK2V4E8:
+        return "rk2v4-e8";
     }
     throw std::logic_error("unknown KV dtype");
 }
@@ -163,7 +181,11 @@ std::string safe_component(std::string_view value) {
 std::string timestamp() {
     const std::time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     std::tm utc{};
+#ifdef _WIN32
+    (void)::gmtime_s(&utc, &now);
+#else
     gmtime_r(&now, &utc);
+#endif
     std::ostringstream out;
     out << std::put_time(&utc, "%Y%m%d-%H%M%S");
     return out.str();
@@ -173,9 +195,9 @@ std::filesystem::path prepare_output_directory(const Options& options,
                                                const ninfer::LoadSummary& load,
                                                const CorpusSelection& corpus) {
     std::filesystem::path output = options.output.value_or(
-        std::filesystem::path("profiles/perplexity") / safe_component(load.model_id) /
-        safe_component(load.weights_id) / kv_name(options.kv) / safe_component(corpus.corpus_id) /
-        safe_component(corpus.mode) / timestamp());
+        std::filesystem::path("profiles/perplexity") / safe_component(load.model_name) /
+        safe_component(load.prefill_signature) / kv_name(options.kv) /
+        safe_component(corpus.corpus_id) / safe_component(corpus.mode) / timestamp());
     if (std::filesystem::exists(output)) {
         if (!std::filesystem::is_directory(output) ||
             std::filesystem::directory_iterator(output) != std::filesystem::directory_iterator()) {
@@ -366,14 +388,15 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
     }
 
     json report{
-        {"schema_version", 1},
+        {"schema_version", 2},
         {"metric",
          {{"name", "fixed-window truncated-context causal perplexity"}, {"log_base", "natural"}}},
         {"artifact",
          {{"path", std::filesystem::absolute(options.artifact).lexically_normal().string()},
-          {"target", load.target},
-          {"model_id", load.model_id},
-          {"weights_id", load.weights_id}}},
+          {"architecture", load.architecture},
+          {"name", load.model_name},
+          {"prefill_signature", load.prefill_signature},
+          {"formats", load.weight_formats}}},
         {"corpus",
          {{"id", corpus.corpus_id},
           {"mode", corpus.mode},
@@ -411,7 +434,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
     std::filesystem::rename(temporary, final);
 
     std::cout << "Perplexity result\n"
-              << "artifact: " << load.model_id << " / " << load.weights_id << '\n'
+              << "artifact: " << load.model_name << '\n'
               << "kv: " << kv_name(options.kv) << ", corpus: " << corpus.corpus_id << " / "
               << corpus.mode << ", context/stride: " << options.context << '/' << options.stride
               << "\n\n";
