@@ -1,0 +1,116 @@
+# Dossier: LMDeploy (TurboMind)
+
+Researched 2026-10-08 (public sources only: repo, docs, release notes, issues, arXiv 2508.15601; repo cloned at v0.18.0 tag for code inspection).
+
+## What it is / backing / license
+
+- **What it is:** toolkit for compressing, deploying, and serving LLMs/VLMs with **two engines**:
+  - **TurboMind** — C++/CUDA engine descended from NVIDIA FasterTransformer ("based on NVIDIA's FasterTransformer", turbomind.md): persistent batch (continuous batching), blocked/paged KV cache manager with LRU "cache of KV caches", "dynamic split&fuse", hand-written FMHA/GEMM kernels, INT4/INT8 KV, W4A16, prefix caching with **recurrent-state checkpoints for GDN hybrid models**.
+  - **PyTorch engine** — pure-Python engine (vLLM-style paged attention, S-LoRA, W8A8, CUDA graphs, piecewise CUDA graph prefill since v0.18) hosting **all speculative decoding** (EAGLE/EAGLE3, DeepSeek-MTP, `qwen3_5_mtp`, DFlash) and the hybrid-attention GDN path via FLA-Triton prefill + TileLang fused-recurrent decode.
+  - README headline claims: "up to 1.8x higher request throughput than vLLM" (persistent batch, blocked KV, dynamic split&fuse, TP, CUDA kernels); "4-bit inference performance is 2.4x higher than FP16"; news items: MXFP4 "on NVIDIA GPUs starting from V100, achieving 1.5x the performance of vLLM on H800 for openai gpt-oss models" (2025/09); "Support Qwen3.5" (2026/02); EuroSys 2027 paper accepted (2026/08). ([README](https://github.com/InternLM/lmdeploy/blob/main/README.md))
+- **Backing:** Shanghai AI Laboratory (LICENSE: "Copyright 2023-2024 Shanghai AI Laboratory"); developed by the MMRazor/MMDeploy teams (OpenMMLab lineage). 8,103 stars, 761 forks, 613 open issues, created 2023-06-15, last push 2026-09-28 (GitHub API).
+- **License:** **Apache-2.0** (LICENSE file). Porting code is license-OK.
+- **Paper:** "LMDeploy Accelerates Mixed-Precision LLM Inference with TurboMind", Li Zhang et al. (Shanghai AI Lab), arXiv [2508.15601](https://arxiv.org/abs/2508.15601), accepted **EuroSys 2027** (README 2026/08).
+
+## Repo, version, last release date
+
+- Repo: <https://github.com/InternLM/lmdeploy>; docs: <https://lmdeploy.readthedocs.io/en/latest/>; PyPI: `lmdeploy`.
+- Latest: **v0.18.0** (2026-09-28, also the newest PyPI release). Cadence ~monthly: v0.14.0 2026-06-24, v0.15.0 2026-07-31, v0.16.0 2026-08-19, v0.17.0 2026-09-01 ([releases](https://github.com/InternLM/lmdeploy/releases)).
+- Since v0.13.0 PyPI wheels are built against **CUDA 12.8** ("sufficient for typical setups including GeForce RTX 50 series", README); v0.16.0 "Upgrade to cu130" (PR #4753). TurboMind from source: C++20 (migrated in v0.18, PR #4946), CMake ≥3.25.2, CUDA ≥12.0 ([installation.md](https://github.com/InternLM/lmdeploy/blob/main/docs/en/get_started/installation.md)).
+
+## Runs on an RTX 4090 (sm_89)?
+
+**Yes — sm_89 is a first-class, documented target, and the full TurboMind C++ path for a GDN hybrid runs on it:**
+
+- Installation doc GPU list: "Volta(sm70) … **Ada Lovelace(sm89): 40 series**" ([installation.md](https://github.com/InternLM/lmdeploy/blob/main/docs/en/get_started/installation.md)); same list in the KV-quant and W4A16 docs ([kv_quant.md](https://github.com/InternLM/lmdeploy/blob/main/docs/en/quantization/kv_quant.md), [w4a16.md](https://github.com/InternLM/lmdeploy/blob/main/docs/en/quantization/w4a16.md)).
+- **GDN hybrid on sm_89 (code-verified):** `src/turbomind/kernels/linear_attn/delta_rule.cu` — `SelectArchitecture()`: "if (arch > 0 && arch < 900) return kPreSm90Architecture". So an RTX 4090 (arch 890) dispatches the **`pre_sm90`** kernel family: hand-written pure-CUDA kernels (no Triton/TileLang/cuDNN) — `kernel/pre_sm90/chunked.cu` (chunked prefill, **chunk size 16**, f16/bf16 input, f16/f32 recurrent state) and `kernel/pre_sm90/recurrent.cu` (fused recurrent decode). The `sm_90`/`sm_120` variants (TMA descriptors, PDL, cp_fwd) are the fast tiers; `TM_GDR_FORCE_LEGACY=1` forces pre_sm90 explicitly.
+- **Attention on sm_89 (code-verified):** `src/turbomind/kernels/attention/arch.h` — `struct Sm80: Arch<800>` with `is_compatible(800, 890) == true`; registered kernels `attention_sm80_{64,128,192,256,576}.cu` + `decoding_sm80_*` → **head-dim 256 available** (Qwen3.5's gated attention).
+- **W4A16/INT4 GEMM on sm_89 (code-verified):** `src/turbomind/kernels/gemm/kernel/sm80_16816_{4,8,16}.cu` use `Arch<800>` (compatible with 890): INT4 weights (group 128) + FP16 scales via `HMMA_16816`; `pack_mxfp4<Arch<80>,…>` also present. The new **SM90-only** GEMMs (`sm90_*`) confirm Ada uses pre-sm90 paths (v0.17.0: "fix(turbomind): restore FP8 weight-only fallback on pre-sm90 GPUs", PR #4871).
+- **PyTorch engine on sm_89:** GDN prefill = FLA (flash-linear-attention) Triton `chunk_gated_delta_rule` (requires `fla` + `tilelang`), decode = own TileLang `fused_recurrent_gated_delta_rule` kernel (`lmdeploy/pytorch/backends/cuda/gated_delta_rule.py`); attention = FA3 if installed (v0.14.0 "enable FA3 for SM80+ GPUs", PR #4591) else Triton paged-attention fallback.
+
+## Supports Qwen3.5–3.8 hybrid (Gated DeltaNet), MTP, vision, 256K?
+
+- **GDN hybrid: yes, in both engines — this is now a first-class supported model family (Qwen3.5 = same family line as our Qwen3.8-27B identity).**
+  - TurboMind C++: `lmdeploy/turbomind/models/qwen3_5.py` (`Qwen3_5TextModel` + `Qwen3_5VisionModel`), `Qwen3_5ForConditionalGeneration='qwen3_5'` in `supported_models.py`; `GatedDeltaNetLayer` (conv_state_ptrs + recurrent_state_ptrs, per-sequence state buffers); recurrent state stored in model activation dtype by default, **`LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1`** switches it to FP32 (matches Qwen's FP32 SSM state; conv state stays in activation dtype) — [turbomind_config.md](https://github.com/InternLM/lmdeploy/blob/main/docs/en/inference/turbomind_config.md).
+  - Supported-models table (TurboMind on CUDA): **Qwen3.5 [0.8B–397B, MLLM]: FP16/BF16 Yes, KV INT8 Yes, KV INT4 No, W4A16 Yes** ([supported_models.md](https://github.com/InternLM/lmdeploy/blob/main/docs/en/supported_models/supported_models.md)). Table note [3]: "TurboMind does not currently support the vision encoder for the Qwen3.5 series" — contradicted by v0.14.0 PR #4602 "support qwen3.5(vit) inference in turbomind backend" and v0.16.0 PR #4719 "Add TurboMind ViT support for InternVL and Qwen VL models" (doc note likely stale).
+  - Release history shows continuous investment: v0.14.0 "update gated delta rule state layout" (#4636), "Fuse gdr preprocess" (#4656), "fix qwen3.5 27b gdr preprocess" (#4676); v0.15.0 "Add generic tensor copy and architecture-aware Gated Delta Rule support" (#4757), "optimize and modularize SSM prefix caching" (#4788); v0.16.0 "SM90 GDR PDL" (#4787) + "fix(turbomind): restore INT8 KV quant-param offset in block layout" (#4764); v0.18.0 "Support dflash for qwen3.5" (#4789).
+  - Autotest config `Qwen3.5-27B.yml`: chat+VL on A100 (`a100`, tp2) and Hopper (`h`, tp2), both backends, quantization `kvint8` (both engines) + `awq` (turbomind); `Qwen3.5-397B-A17B.yml` runs tp2/dp4/ep8 incl. **MTP speculative decoding (qwen3_5_mtp, 4 draft tokens)** and prefix-cache tests with `prefix-cache-decode-state-interval: 1024, prefix-cache-state-budget: 256`. **No 4090 test config exists.**
+  - Qwen3-Next (80B, GDN hybrid): **PyTorch engine only** (table row: FP16 Yes; KV INT8/INT4, W8A8, W4A16 all No).
+- **MTP: yes, but PyTorch engine only.** TurboMind (C++) has **no MTP/speculative decoding at all** (no MTP code under `src/turbomind/`). PyTorch engine proposers: `eagle`, `eagle3`, `deepseek_mtp`, **`qwen3_5_mtp`** (subclass of the DeepSeek-MTP proposer, reuses target model's `embed_tokens`), `hy3_mtp`, **`dflash`** — spec-decoding doc: "This feature is supported for spec methods that inherit from `DeepseekMTP`, including `deepseek_mtp`, `qwen3_5_mtp`, and `eagle3`. **Only the PyTorch backend is supported**" (grammar-aware MTP via xgrammar: draft positions masked serially, then target verification). DFlash doc example: `z-lab/Qwen3.5-35B-A3B-DFlash` drafter, `dflash_block_size=8` (7 draft tokens). v0.15.0: "Support long-context and **MTP prefix-cache hits**" (#4688), "Fix **MTP recurrent state round-trip for Qwen3.5**" (#4744) — i.e. MTP verify works over GDN hybrid state.
+- **Vision: yes (both engines), Qwen3.5 MLLM in TurboMind** (per table; see note conflict above), Qwen2-VL/2.5-VL/3-VL all listed; PyTorch engine full VLM stack (Qwen3.5 VLM, video).
+- **256K: supported in principle, not validated on a 4090.** TurboMind: Paged Attention with 128-token blocks (`cache_block_seq_len`), KV block bytes = `cache_block_seq_len * num_layer * kv_head_num * size_per_head * 2 * sizeof(kv_dtype)`, `cache_max_entry_count` = fraction of free memory (default 0.8); long context via **Dynamic NTK RoPE** (`rope_scaling_factor ≥ 1.0`) and LogN scaling; published 1M-token example is `internlm2_5-7b-chat-1m` at **tp=4 on A100-80G** ("approximately 364 seconds per round" passkey test) — [long_context.md](https://github.com/InternLM/lmdeploy/blob/main/docs/en/advance/long_context.md). PyTorch engine: `longtext_benchmark`/`longtext_evaluate` coverage in the Qwen3.5 configs (A100/Hopper only). **256K on a single 4090: not found.**
+
+## Published numbers on a 4090 or similar
+
+**On an RTX 4090 (published by LMDeploy):**
+
+- W4A16 (AWQ INT4 weights), RTX 4090, single batch, 1 prompt token → 512 generated tokens ([w4a16.md](https://github.com/InternLM/lmdeploy/blob/main/docs/en/quantization/w4a16.md)):
+
+  | model | llm-awq | mlc-llm | turbomind |
+  |---|---|---|---|
+  | Llama-2-7B-chat | 112.9 tok/s | 159.4 tok/s | **206.4 tok/s** |
+  | Llama-2-13B-chat | N/A | 90.7 tok/s | **115.8 tok/s** |
+
+- **EuroSys 2027 paper** ([arXiv 2508.15601](https://arxiv.org/html/2508.15601v1)): 16 LLMs × 4 GPU architectures — "**RTX 4090, L40S, A100, H100**" — baselines vLLM v0.9.1+MARLIN, TensorRT-LLM v0.20.0, OmniServe+QServe:
+  - End-to-end vs vLLM+MARLIN (Qwen 8B and 32B **AWQ**, all 4 GPUs incl. the 4090): throughput **average +13%, max +31%** (high-batch); TTFT **average −12.0%, max −33.3%**; online serving **average +15.0%**.
+  - Attention kernel vs vLLM+MARLIN (Qwen3-8B AWQ, W4A16KV8, vs fp8_e5m2-KV baseline): prefill **avg −22.1% latency (max −48.7%)**, decode **avg −7.6% (max −29.9%)**; GEMM kernels **avg +19.2% (max +25.5%)**; attention memory-bandwidth utilization **up to 86% / 93% with 8-bit KV** (Appendix G).
+  - INT4×FP16 GEMM vs FP16×FP16 **on A100**: batch 1–16 **average +134% latency improvement (max +220.3%)**; batch 64 parity; MARLIN degrades up to 20.3%; I2F overhead = +64.66% instructions but only +2.89% cycles / +2.45% execution time.
+  - 12 models on A100 (dense 7B–235B + Mixtral MoE, AWQ/GPTQ): serving latency **avg −21.1% (max −47.9%)**, P99 **avg −20.0% (max −39.2%)**.
+  - vs TensorRT-LLM (Qwen 7B/14B AWQ, **L40S and A100**): throughput **avg +118.90% (peak +171.11%)**, TTFT **avg −52.2% (max −65.0%)**, E2E latency **avg −50.3% (peak −59.2%)**.
+  - INT8 KV (LMDeploy) vs FP8 KV (vLLM+MARLIN), Qwen 8B/32B AWQ, A100/H100: throughput **avg +50.6% (peak +156.3% high-batch A100)**, latency **avg −24.6% (max −40.5%)**, P99 **avg −24.4% (max −39.4%)**.
+  - QServe-style cross-system (each at its optimal format, multi-GPU): LMDeploy W4A16KV4 beats OmniServe+QServe **avg +14.1% (max +23.0%)**, vLLM+MARLIN **avg +84.8% (max +165.1%)**, TRT-LLM **avg +115.5% (max +260.6%)**.
+  - KV precision sensitivity (A100, Qwen 8B/32B AWQ): INT8 KV **avg +11.9% throughput (peak +37.5% long-seq)**; INT4 KV **avg +18.3% (peak +57.9% long-seq)** over 16-bit.
+  - Abstract headline: "up to 61% lower serving latency (30% on average) and up to 156% higher throughput (58% on average)".
+
+**Other published LMDeploy numbers (GPU as stated):**
+
+- KV-quant RPS table ([kv_quant.md](https://github.com/InternLM/lmdeploy/blob/main/docs/en/quantization/kv_quant.md), settings tp1 / `cache_max_entry_count` 0.8 (13b: 0.9) / bs 256 (13b: 128) / 10000 ShareGPT prompts; **GPU not stated in the doc**): llama2-chat-7b fp16 14.98 / int8 19.01 / int4 20.81 RPS; llama2-chat-13b 8.55 / 10.96 / 11.91; internlm2-chat-7b 24.13 / 25.28 / 25.80. Claim: "int8/int4 kv … RPS is improved by round 30% and 40% respectively compared to fp16" (llama2-7b).
+- **TurboQuant** (Google Research, ICLR 2026; LMDeploy `quant_policy=42`, **PyTorch engine only**, no MLA, no spec decode): K = 4-bit QJL4 (3-bit Lloyd-Max + 1-bit QJL residual sign), V = 2-bit MSE → avg 3 bits/token, "≈5x KV cache memory reduction". Published table — **H200, Qwen3-30B-A3B-Base, ShareGPT, concurrency 64, 5000 requests** (kv_quant.md): input throughput 2368.8 → 2195.8 tok/s (−7.3%); output 2186.7 → 2027.0; requests 10.74 → 9.96 req/s; mean E2E 5.888 s → 6.348 s; TTFT 1.139 s → 1.235 s; TPOT 0.024 s → 0.026 s; ITL 0.059 s ≈ 0.059 s.
+- OpenCompass KV-accuracy tables (kv_quant.md): e.g. qwen1.5-7b-chat C-Eval 70.56 (fp16) / 70.49 (int8) / 68.62 (int4); "int8 kv keeps the accuracy while int4 kv has slight loss".
+
+## Ideas we could port into ninfer-4090
+
+All under Apache-2.0 in the lmdeploy tree; gains as *they* measured them (4090-specific numbers do not exist for hybrid models — validate locally).
+
+1. **`pre_sm90` GDR kernel family** — `src/turbomind/kernels/linear_attn/kernel/pre_sm90/` (`chunked.cu`: chunk-16 chunked GDN prefill with state in smem, one block per V head; `recurrent.cu`: fused recurrent decode, tile_k 16 / tile_v 4, 2 blocks/SM `__launch_bounds__`). Pure hand-written CUDA for exactly our SM80/89 class, zero external deps. Direct reference/stand-in for our GDN prefill+decode ops; compare numerics against our replay path. (The sm90/sm120 tiers are TMA/PDL and not portable, but the pre_sm90 design is.)
+2. **GDN aux-kernel suite** — `src/turbomind/models/llama/gated_delta_net_kernels.cu`: fused `ComputeBetaG` (sigmoid β + exp(a→g)), `L2NormalizeQK` (Qwen's QK L2-norm), `rms_norm_gated`, `fused_conv1d_batched_kernel_v2` (conv1d+SiLU over batched sequences with per-sequence conv state), plus a CPU-reference benchmark `bench_conv1d_silu.cc`. Check these fusions against our conv/gate/norm ops.
+3. **W4A16 INT4 weight path on Ada** — `src/turbomind/kernels/gemm/kernel/sm80_16816_4.cu` (INT4 group-128 weights, FP16 scales, HMMA_16816) + the paper's **hardware-aware offline weight packing** (§4.1: bit-extend → LDSM fragment load → bit-compress/permute → coalesced store; online = cp.async + LDSM, zero runtime swizzle). Their measured: 4090 Llama-2-7B W4A16 206.4 tok/s vs llm-awq 112.9 (README: "2.4x faster than FP16"). For a 27B on 24 GB, INT4 weights (~0.57 B/param) is the same lever as our groupwise recipe at a lower bit — the offline-packing method (not the layout) is what transfers.
+4. **INT4/INT8 KV cache inference on Ada** — online per-head/per-token asymmetric quant; the attention pipeline's **adaptive head alignment** (§4.2: rearrange FP16 Q fragments once per step to match low-bit K tiles, instead of dequantizing KV first), **instruction-level parallelism** (§4.3: tensor-core MMA on tile k ∥ I2F+FMA on tile k+1 ∥ cp.async prefetch, depth ≥3) and **KV memory loading pipeline** (§4.4, 16-value micro-tiles / 64-token macro-tiles, multi-buffered smem). Measured: up to 86%/93% of memory bandwidth with 8-bit KV; INT8-KV attention beats FP8-KV vLLM attention (avg −24.6% latency). Candidate: our INT8-KV attention on a 4090, and a 4-bit-KV tier to push 256K further under 24 GB.
+5. **Hybrid prefix caching with recurrent-state checkpoints** (TurboMind 2.x): partial-block prefix nodes "on a recurrent/hybrid model (e.g. those with GatedDeltaNet layers) … additionally carr[y] a recurrent-state checkpoint"; knobs `cache_prompt`/`cache_generation` (`'all'`/`'auto'`/`'none'`), `cache_prompt_boundary_skip` for volatile chat-template suffixes, full-block checkpoints at block boundaries "always published"; plus SSM state budgets in their Qwen3.5 configs (`prefix-cache-decode-state-interval`, `prefix-cache-state-budget`). C++ reference for our context-cache policy on GDN layers (cf. vLLM Jenga / SGLang unified radix — three independent implementations of the same idea now).
+6. **Persistent-batch scheduler semantics** — pre-configured slots, LRU "cache of KV caches" (evicted sequences kept as token IDs, FMHA-recomputed on miss, "infinite device memory"), token-budget chunked prefill fused into the same round as decode ("dynamic split&fuse"). A checklist to compare against NInfer's ingress/compact-batch rules.
+7. **MXFP4 (e2m1) weights on SM80-class** — `pack_mxfp4<Arch<80>,…>` in `sm80_16816_4.cu`; README: "TurboMind supports MXFP4 on NVIDIA GPUs starting from V100" (2025/09). If the next Qwen ships an MXFP4 export, this is the 4-bit-float weight path for Ada (loading of llmcompressor-MXFP4A16 checkpoints still buggy: open issue #4440).
+8. **Piecewise CUDA graph with eager islands for hybrid ops** (PyTorch engine, v0.18 PR #4895 "add piecewise CUDA graph prefill"; `CudaGatedDeltaRuleImpl` wraps the GDN boundary in an `eager_boundary` so the graph replays prefill while GDN runs eagerly from live metadata). Design reference for keeping our CUDA-graph strategy on a hybrid model.
+9. **MTP / DFlash verify plumbing on a GDN hybrid** (PyTorch engine only): `qwen3_5_mtp` proposer (reuses target embeddings, DeepSeek-MTP mechanics), DFlash block-size drafting (v0.18, #4789) with the z-lab Qwen3.5 drafter, recurrent-state round-trip fix for MTP (#4744), MTP prefix-cache hits (#4688), grammar-masked MTP (xgrammar) — reference for how spec-verify interacts with recurrent state. TurboMind itself has none of this.
+
+## Worth running beside NInfer/llama.cpp?
+
+**Yes — arguably the highest-priority engine test after llama.cpp itself, and more than the seed row implies.** It is the only engine besides ours with a complete **C++/CUDA** path for a dense GDN hybrid on sm_89 (pre_sm90 GDR + sm80-class FMHA incl. head-dim 256 + W4A16 + INT4/INT8 KV + hybrid prefix caching), and Apache-2.0, so its kernels are directly readable/portable.
+
+A fair test on our box: same Qwen3.5-27B-family checkpoint (or the next dense Qwen at release), tp=1, TurboMind W4A16 (AWQ group-128 via `lmdeploy lite auto_awq`) and/or groupwise weights, KV INT8 (INT4 if it works on the 256-dim heads — table says No), batch 1–8, prefill 2K/2048/32K + decode at 32K/128K/256K context; compare prefill tok/s, decode tok/s, TTFT against NInfer (groupwise-int, our KV recipes) and llama.cpp. Expectations to check: (a) does their pre_sm90 GDN prefill (chunk 16) approach our GDN prefill rate on 4090 — no hybrid-4090 numbers are published anywhere, so this is new information; (b) INT4-KV vs our INT8/E8 KV at long context; (c) W4A16 decode vs our groupwise decode (their only 4090 decode data is 2023-era Llama-2). Caveats: TurboMind has **no MTP/spec decode** (its C++ engine), so decode comparisons are MTP0-equivalent; the MTP/DFlash comparison needs the PyTorch engine (`qwen3_5_mtp` or `dflash` with a z-lab drafter), which runs GDN via FLA-Triton/TileLang, not the C++ kernels. Weight conversion and a CUDA 12.8/13 build are prerequisites.
+
+## Risk / unknowns
+
+- **No published hybrid-model 4090 numbers exist** (theirs or anyone's): all their 4090 data is Llama-2 W4A16 (2023 doc table) and the paper's relative percentages on dense Qwen 8B/32B AWQ. The pre_sm90 GDN tier's actual 4090 performance is unverified.
+- **pre_sm90 is the "legacy" tier.** Their kernel investment is visibly on `sm_90`/`sm_120` (TMA descriptors, PDL GDR "enable SM90 GDR PDL" #4787, SM90 GEMM #4795/#4943, PDL paged attention #4861); the pre_sm90 path may lag. On a 4090 the GDN layers run pre_sm90 only.
+- **KV INT4 is "No" for Qwen3.5** in the TurboMind table (plausibly tied to the head-dim≠128 limitation in note [2]; their note [2] names head-dim-64 models, so whether 256-dim heads are the blocker is unresolved). Open bug #2822: "4-bit KV cache results in very low performance while 8-bit KV cache is almost lossless".
+- **Doc staleness/conflicts**: table note "TurboMind does not currently support the vision encoder for the Qwen3.5 series" vs the v0.14/v0.16 ViT PRs; KV-quant RPS table states no GPU; issue #4440 (MXFP4A16 loading, 0.12.2) still open.
+- **MTP is Python-only** in this project; their C++ engine can't match our MTP numbers head-to-head.
+- 613 open issues; monthly releases with breaking renames (C++20 migration, engine refactors in v0.17/0.18) — pin the version when testing.
+- 24 GB budget for 27B: W4A16 weights + INT8/INT4 KV is the regime that fits (their Qwen3.5-27B autotest is tp=2 on A100/Hopper); single-4090 headroom at 256K is a local question, no published data.
+
+## Sources
+
+- https://github.com/InternLM/lmdeploy (README, LICENSE, v0.18.0 tree: `src/turbomind/kernels/linear_attn/delta_rule.cu`, `src/turbomind/kernels/linear_attn/kernel/pre_sm90/{entry,chunked,recurrent}.cu`, `src/turbomind/kernels/attention/arch.h` + `kernel/attention_sm80_*.cu`/`decoding_sm80_*.cu`, `src/turbomind/kernels/gemm/kernel/sm80_16816_{4,8,16}.cu`, `src/turbomind/models/llama/{GatedDeltaNetLayer.h,gated_delta_net_kernels.cu,bench_conv1d_silu.cc}`, `lmdeploy/turbomind/models/qwen3_5.py`, `lmdeploy/pytorch/{models/qwen3_5.py,models/qwen3_5_mtp.py,models/qwen3_dflash.py,backends/cuda/gated_delta_rule.py,kernels/cuda/gated_delta_rule.py}`, `autotest/configs/Qwen/Qwen3.5-27B.yml`)
+- https://github.com/InternLM/lmdeploy/releases (v0.14.0–v0.18.0 release notes; PRs #4602 #4719 #4744 #4757 #4764 #4787 #4788 #4789 #4861 #4871 #4895 #4897 #4943 #4946)
+- https://github.com/InternLM/lmdeploy/blob/main/docs/en/get_started/installation.md (sm89 GPU list; C++20/CUDA 12.0 build)
+- https://github.com/InternLM/lmdeploy/blob/main/docs/en/supported_models/supported_models.md (TurboMind/PyTorch tables, Qwen3.5 row + notes, Qwen3-Next row)
+- https://github.com/InternLM/lmdeploy/blob/main/docs/en/quantization/kv_quant.md (sm89 list, INT4/INT8 KV, TurboQuant H200 table, RPS table, OpenCompass accuracy tables)
+- https://github.com/InternLM/lmdeploy/blob/main/docs/en/quantization/w4a16.md (sm89 list, **RTX 4090 W4A16 table**, AWQ/GPTQ)
+- https://github.com/InternLM/lmdeploy/blob/main/docs/en/inference/turbomind.md (persistent batch, KV cache manager, FT lineage)
+- https://github.com/InternLM/lmdeploy/blob/main/docs/en/inference/turbomind_config.md (paged KV formula, recurrent-state dtype, partial-block prefix reuse with recurrent-state checkpoints, dynamic NTK)
+- https://github.com/InternLM/lmdeploy/blob/main/docs/en/inference/pytorch.md (PyTorch engine architecture, S-LoRA, paged KV)
+- https://github.com/InternLM/lmdeploy/blob/main/docs/en/advance/spec_decoding.md (eagle3/deepseek_mtp/qwen3_5_mtp/dflash; PyTorch-backend-only note; z-lab Qwen3.5 DFlash example)
+- https://github.com/InternLM/lmdeploy/blob/main/docs/en/advance/long_context.md (1M-token internlm2.5 example on A100 tp4)
+- https://arxiv.org/abs/2508.15601 / https://arxiv.org/html/2508.15601v1 (EuroSys 2027: pipelines, 4-GPU incl. RTX 4090 evaluation, all percentages quoted)
+- https://github.com/InternLM/lmdeploy/issues/815 (per-arch benchmark issue; only A100 W4A16 tables posted), /issues/4440 (MXFP4A16 loading bug), /issues/2822 (INT4 KV low performance)
+- https://pypi.org/project/lmdeploy/ (v0.18.0 latest), https://github.com/InternLM/lmdeploy (repo stats via GitHub API)
