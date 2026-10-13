@@ -566,7 +566,7 @@ int run_quantized_case(const char* label, Table& table, const std::vector<std::i
     DeviceContext device;
     DecodeGraphDefinition definition;
     DecodeGraphExecutable graph;
-    const auto launch = [&] { ops::embedding(input, weight, result, device.stream); };
+    const auto launch = [&] { ops::embedding(input, weight, 1.0F, result, device.stream); };
     int failures      = 0;
     for (int phase = 0; phase < (replay ? 2 : 1); ++phase) {
         const auto selected = phase == 0 ? ids : dflash2_ids(ids.size(), true);
@@ -653,7 +653,7 @@ int test_fp8() {
     Weight invalid      = table.weight();
     invalid.scale_dtype = DType::FP16;
     try {
-        ops::embedding(input, invalid, result, nullptr);
+        ops::embedding(input, invalid, 1.0F, result, nullptr);
         std::cerr << "embedding FP8 accepted malformed row-scale metadata\n";
         ++failures;
     } catch (const std::invalid_argument&) {}
@@ -699,7 +699,7 @@ int test_dense() {
 
     Tensor input(device_ids.data(), DType::I32, {static_cast<std::int32_t>(ids.size())});
     Tensor result(output.data(), DType::BF16, {kDenseD, static_cast<std::int32_t>(ids.size())});
-    ops::embedding(input, weight, result, nullptr);
+    ops::embedding(input, weight, 1.0F, result, nullptr);
     cuda_synchronize();
 
     int failures = verify_exact("embedding BF16 [2304,1152]",

@@ -305,7 +305,7 @@ void TextContext::mtp_forward_stem(const Tensor& ids, const Tensor& hidden,
         emb = input_embeddings->view({dimension(config_.hidden_size), T});
     } else {
         emb = roots.embedding;
-        ops::embedding(flat_ids, *embed_, emb, s);
+        ops::embedding(flat_ids, *embed_, 1.0F, emb, s);
     }
 
     Tensor e = roots.normalized_embedding;
@@ -701,7 +701,7 @@ void TextContext::ordinary_decode_batch(const Tensor& ids, const Tensor& cache_p
         ScopedValue<std::int32_t> width_binding(active_sequence_width_, 1);
 
         Tensor x = work_.alloc(DType::BF16, {dimension(config_.hidden_size), batch});
-        ops::embedding(ids, *embed_, x, stream);
+        ops::embedding(ids, *embed_, 1.0F, x, stream);
         NullTap tap;
         run_layers(x, Phase::Verify, tap);
         ops::rmsnorm(x, *final_norm_, config_.rms_norm_eps, true, hidden, stream);
@@ -755,7 +755,7 @@ void TextContext::target_verify_batch_impl(const Tensor& ids, const Tensor& cach
 
         Tensor x        = work_.alloc(DType::BF16, {dimension(config_.hidden_size), columns});
         Tensor flat_ids = ids.view({columns});
-        ops::embedding(flat_ids, *embed_, x, stream);
+        ops::embedding(flat_ids, *embed_, 1.0F, x, stream);
         if constexpr (Tap::enabled) { tap.begin(x); }
         run_layers(x, Phase::Verify, tap);
         if constexpr (requires { tap.capture_positions(cache_positions, stream); }) {
@@ -1247,7 +1247,7 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
             ScopedEnvelope scoped_envelope(active_causal_attention_envelope_, chunk_envelope);
 
             Tensor x = roots.residual;
-            ops::embedding(ids_device, *embed_, x, s);
+            ops::embedding(ids_device, *embed_, 1.0F, x, s);
             if (!local_scatter_indices.empty()) {
                 Tensor indices_device = roots.scatter_indices;
                 copy_i32(local_scatter_indices.data(), indices_device, s);
@@ -1320,7 +1320,7 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 if (multimodal != nullptr) {
                     mtp_input_embeddings =
                         work_.alloc(DType::BF16, {dimension(config_.hidden_size), len});
-                    ops::embedding(mtp_ids, *embed_, mtp_input_embeddings, s);
+                    ops::embedding(mtp_ids, *embed_, 1.0F, mtp_input_embeddings, s);
                     if (vision_chunk.control != nullptr) {
                         const qwen3_5::MtpVisualOverlap overlap = qwen3_5::shifted_visual_overlap(
                             vision_chunk.control->scatter_indices, alignment_tokens, mtp_window);
