@@ -6,25 +6,35 @@ carry-over verified from branch logs. The live-fork diff is still pending
 (`git remote add` / `fetch` for giveen/ninfer-ext needs network from a
 non-plan session); the review steps below are ready to run.
 
-## What we believe (unverified, from the operator's description)
+## Verified (fetched 2026-10-13, remote `ext`, 21 branches)
 
-- Extends ninfer to other model families and larger support.
-- Currently NVFP4-only — needs a port to the 4090 groupwise-int path.
+- `ext/master` @ `0d5788d7`. **No common ancestor with `rtx4090-port`**
+  (`merge-base` fails) — different tree layout (`src/models/`, upstream-v3
+  style, vs our `src/targets/` v2 line). Direct diff is 1905 files of noise;
+  review family-by-family, not by diff.
+- Registered architectures (`src/models/registry.h`): **Qwen3_5, Qwen3_5Moe,
+  Qwen4Exp, Gemma4**. Families: Qwen3.8-Flash-Next (~180B MoE, stock NInfer
+  cannot load it), Gemma4 26B-A4B QAT + 31B IT (text+vision), Qwen3.6-35B-A3B
+  (groupwise-int AND nvfp4), Qwen3.8-27B groupwise-int.
+- **NVFP4 confirmed Blackwell-only**: tensor-core A16 kernel for NVFP4 MLP
+  projections. 4090 port = load-time repack to groupwise-int, no FP4 exec.
+- **No sm_89 anywhere in `ext/master` `src/`** — 5090-only, as expected.
+- Overlap with our research: `prep4qwen` already studied qwen4_exp
+  (Qwen3.8-Flash-Next, `docs/research/qwen38-flash-next.md`) — read that
+  first before touching ext's Qwen4Exp.
+- Useful extras beyond families: EXL3 quantization docs, constrained
+  decoding + tool calls, `tools/upgrade_ninfer_v2_to_v3.py` (compare with
+  our v3-forward port), honest benchmark-vs-stock methodology.
 
-## Review steps (once network is available)
-
-1. `git remote add ext https://github.com/giveen/ninfer-ext.git && git fetch ext`
-2. `git diff --stat rtx4090-port..ext/<default-branch>` — new `src/targets/*`,
-   new identities, NVFP4-only ops, converter changes, container version.
-3. `git diff --stat gzenz/master..ext/<default-branch>` — what is genuinely new
-   vs upstream vs inherited from the 3090 base.
-4. Record commit hashes + keep/skip verdicts in the table below.
-
-## Keep / skip (to fill in)
+## Keep / skip (first verdicts)
 
 | ext change | Verdict | 4090 port note |
 |---|---|---|
-| (pending fetch) | — | NVFP4 exec → load-time repack to groupwise-int; no FP4 tensor cores on sm_89 |
+| Qwen4Exp / Flash-Next family | Keep, after v3-forward | Needs v3 loader; MoE 180B won't fit 24GB without offload — measure first |
+| Gemma4 family (26B-A4B, 31B) | Keep, after v3-forward | New Variant per AGENTS.md; QAT weights repack to groupwise-int |
+| Qwen3.6-35B-A3B nvfp4 | Repack only | No FP4 exec on sm_89; groupwise-int line already exists upstream |
+| EXL3 / constrained decoding / tool calls | Evaluate | Small, possibly cherry-pickable independent of families |
+| v2→v3 upgrade script | Compare | Our port/v3-forward may already cover; diff before adopting |
 
 ## v3 carry-over (verified 2026-10-13)
 
