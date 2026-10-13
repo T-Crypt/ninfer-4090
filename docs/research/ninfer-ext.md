@@ -36,6 +36,32 @@ non-plan session); the review steps below are ready to run.
 | EXL3 / constrained decoding / tool calls | Evaluate | Small, possibly cherry-pickable independent of families |
 | v2→v3 upgrade script | Compare | Our port/v3-forward may already cover; diff before adopting |
 
+## Artifact source (operator-provided 2026-10-13)
+
+- https://huggingface.co/jabbatheduck/ninfer-ext-models — believed to hold
+  the ext `.ninfer` model artifacts. Not yet inventoried (needs HF CLI file
+  listing, no downloads). Next: list files/revisions per family, pin
+  revision + SHA per artifact in the port spec before converting anything.
+- The uncensored HauhauCS GGUF→HF→ninfer path (branch `ninfer-uncensored`,
+  tool `gguf_to_hf`) is the template for any family whose ext artifact is
+  NVFP4-only: repack at convert/load time to groupwise-int.
+
+## v3 merge (done 2026-10-13, commit 42837d7c)
+
+- Merged `port/v3-forward` (stage 4, 322a7f51) with `-X theirs`; 11
+  modify/delete conflicts resolved to the v3 deletions after verifying each
+  HEAD-side change was carried: slot save/restore, vision_max_tokens,
+  auto-long-anchors, E8 KV, sm_89 gates, #6/#8 serve fixes, 1M visible-keys
+  envelope, DFlash2 sm_89 shared-mem shape of the work.
+- Two known follow-ups, not blockers: v3 reads native context from the
+  artifact (no kNativeContext constant) — verify 262K+ loads at serve-test
+  time; v3 redesigned the DFlash loader — verify the compact-artifact
+  (no-DFlash-weights) case fails gracefully.
+- Gotcha: repo `.gitignore` line 37 (`models/`, unanchored) ignores new
+  files under `src/models/` — new family files need `git add -f`. Root
+  `models/` (weights) is already covered by line 35 (`/models/`), so that
+  line 37 is a candidate for removal on this line.
+
 ## v3 carry-over (verified 2026-10-13)
 
 - `port/v3-forward` stage 4 green on sm_89: INT8 group-64 prefill (322a7f51),
