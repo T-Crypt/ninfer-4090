@@ -1,0 +1,96 @@
+{
+  "schema": "ninfer.artifact-manifest",
+  "schema_version": 1,
+  "artifact": {
+    "filename": "qwen3_8_27b_hauhaucs.v3.ninfer",
+    "bytes": 20437571568,
+    "sha256": "b721bac6c6132bfcde56d64008cd447027e4f8b65f550e0cc067ba2940e8c4d5",
+    "container_version": 3,
+    "file_identity": "fe841303edb94e3da01939339908d226",
+    "metadata_name": "qwen3.8-27b",
+    "model_id": "qwen3.8-27b",
+    "weights_id": "groupwise-int",
+    "directory_bytes": 413664,
+    "data_start": 413696,
+    "payload_bytes": 20437157872
+  },
+  "source": {
+    "base": {
+      "repo_id": "HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF",
+      "revision": "993a5971fda8f30dd1b7eb2654792ba4415c7460",
+      "file": "Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-Q8_K_P.gguf",
+      "file_sha256": "4e7735df4d1e2ec721f2551f531b815702a2f89123238c564797eda4b0304bc",
+      "license": "Apache-2.0"
+    },
+    "reference": {
+      "repo_id": "Qwen/Qwen3.8-27B",
+      "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+      "use": "six frontend files and all 333 model.visual.* tensors",
+      "license": "Apache-2.0"
+    },
+    "dflash2": {
+      "repo_id": "z-lab/Qwen3.8-27B-DFlash2",
+      "revision": "50307d4c4cde6860d4eee73e2547cd786fe8e8a4",
+      "license": "Apache-2.0"
+    }
+  },
+  "conversion": {
+    "recipe_id": "qwen3_8_27b-v2",
+    "converter_repository": "https://github.com/T-Crypt/ninfer-4090",
+    "converter_revision": "b9b9e19ddc3e9ca8ecee6288346f4d43336c60bc",
+    "gguf_to_hf_revision": "dbc56a6da6ffcded69cf64d720e3d793f3ae3f9a",
+    "device": "cuda",
+    "elapsed_seconds": 181.75010644800022,
+    "gpu": "NVIDIA GeForce RTX 4090"
+  },
+  "upgrade": {
+    "from": {
+      "filename": "qwen3_8_27b_hauhaucs.ninfer",
+      "container_version": 2,
+      "bytes": 20437336576,
+      "sha256": "c58617dd7dc5c171eb90f48dd8e0a1db6d1669bed3dccdf4e431aff014c992b6"
+    },
+    "tool": "tools/upgrade_ninfer_v2_to_v3.py",
+    "changes": {
+      "objects_identical": 1189,
+      "objects_total": 1190,
+      "replaced": [
+        {
+          "id": "frontend/chat_template.jinja",
+          "was": { "offset": 12827248, "bytes": 8952 },
+          "now": { "offset": 20437148160, "bytes": 9712 }
+        }
+      ]
+    },
+    "payload_preserved": {
+      "bytes": 20437148160,
+      "sha256": "6347b9da125b14c43d701850c9a1ec088af80b992afdf472be1309247167f942",
+      "note": "the first 20437148160 bytes of this file's payload hash equal to the v2 payload; 1189 of 1190 objects keep their v2 offset and length"
+    }
+  },
+  "runtime": {
+    "repository": "https://github.com/sergiuszm/ninfer-4090",
+    "minimum_revision": "322a7f51ae24c5a08034f8f2a293cd8e9e83019c",
+    "binary": "ninfer-serve-v3-322a7f51 (the sm_89 v3 build)",
+    "requires_container_v3_reader": true,
+    "cuda_architecture": "sm_89",
+    "activation_policy": { "declared": "A16Only", "uses": 844 },
+    "kv_dtype": "rk4v4-e8",
+    "speculative_decoding": { "mode": "mtp", "draft_tokens": 3, "lm_head_draft": true }
+  },
+  "inventory": {
+    "objects": 1190,
+    "tensors": 1184,
+    "resources": 6,
+    "formats": {
+      "bf16": 627,
+      "fp32": 96,
+      "int32": 1,
+      "q4_g64_fp16": 183,
+      "q5_g64_fp16": 246,
+      "q6_g64_fp16": 1,
+      "q8_g32_fp16": 30
+    },
+    "components": ["text", "vision", "mtp", "dflash2"]
+  }
+}
