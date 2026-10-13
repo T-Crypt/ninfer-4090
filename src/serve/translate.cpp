@@ -162,12 +162,18 @@ ResolvedPromptSemantics resolve_prompt_semantics(const GenerationRequest& reques
                                   "reasoning_effort", "conflicting_template_option");
         // A request effort overrides the server's thinking default.
         result.enable_thinking = enables;
+        // The qwen3_8 chat template accepts only xhigh, medium and low
+        // (tools/chat_templates/qwen3_8.jinja, which the v3 artifacts carry as
+        // frontend/chat_template.jinja) and raises on anything else, so the whole request
+        // failed with HTTP 400 invalid_prompt. The Anthropic path passes the client's effort
+        // straight through and Claude Code sends "high". Clamp to the template's vocabulary;
+        // request_log still records what the client actually asked for.
         switch (*effort) {
         case RequestedReasoningEffort::None:
             result.reasoning_effort = ninfer::ReasoningEffort::None;
             break;
         case RequestedReasoningEffort::Minimal:
-            result.reasoning_effort = ninfer::ReasoningEffort::Minimal;
+            result.reasoning_effort = ninfer::ReasoningEffort::Low;
             break;
         case RequestedReasoningEffort::Low:
             result.reasoning_effort = ninfer::ReasoningEffort::Low;
@@ -176,13 +182,11 @@ ResolvedPromptSemantics resolve_prompt_semantics(const GenerationRequest& reques
             result.reasoning_effort = ninfer::ReasoningEffort::Medium;
             break;
         case RequestedReasoningEffort::High:
-            result.reasoning_effort = ninfer::ReasoningEffort::High;
+        case RequestedReasoningEffort::Max:
+            result.reasoning_effort = ninfer::ReasoningEffort::XHigh;
             break;
         case RequestedReasoningEffort::XHigh:
             result.reasoning_effort = ninfer::ReasoningEffort::XHigh;
-            break;
-        case RequestedReasoningEffort::Max:
-            result.reasoning_effort = ninfer::ReasoningEffort::Max;
             break;
         }
     }
