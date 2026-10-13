@@ -137,6 +137,10 @@ measured on the v2 container, whose weights are the v3 file's weights:
 | Image request | correct description | not recorded in this run |
 | Refusal probes | both answered (the point of this tune) | both refused |
 
+Served check on the v3 container itself, same machine and flags, through llama-swap on 2026-10-13:
+decode 156.2 tok/s, MTP draft 57 accepted 50 (87.7%), prompt 292.6 tok/s on a 69-token prompt, 70
+tokens in 441.8 ms, answer correct. One spot run, not a suite.
+
 For scale: the same GGUF under llama.cpp at a 131K context setting decoded at 91.6 tok/s here. The
 context, KV type and draft settings differ between the two engines, so that pair is a sanity check,
 not a controlled comparison. These are single-run spot measurements, not a benchmark suite.
@@ -161,16 +165,16 @@ not a controlled comparison. These are single-run spot measurements, not a bench
   --vision --preserve-thinking
 ```
 
-`--kv-dtype rk4v4-e8` is the 4-bit KV codec of the 4090 port. In this lab the v2 file is served as
-`NInfer-HauHauCS-27B` through llama-swap, next to the official artifact; the v3 file is what the v3
-binary line consumes.
+`--kv-dtype rk4v4-e8` is the 4-bit KV codec of the 4090 port. In this lab the v3 file is served as
+`NInfer-HauHauCS-27B` through llama-swap, next to the official artifact; the v2 file is the rollback
+that the older build reads.
 
 ## Limits
 
 - The containers pair with the engine: the v2 file needs the v2 reader, the v3 file needs the v3
   reader. A build that reads one will not open the other.
-- The v3 file is an upgrade of the v2 file, so it inherits the weights and the measurements above.
-  Nothing was re-measured on the v3 container itself beyond the byte-level checks.
+- The v3 file is an upgrade of the v2 file, so it carries the same weights and the same measured
+  quality. Its own serve check is the one spot run above.
 - Perplexity is about 1.3% above the official artifact's quantized build on the quick corpus. That is
   the price of re-quantizing a Q8_K_P GGUF that was itself a dequantize of the tune.
 - The uncensoring is a weight-level change made by HauhauCS. It is reported here as published, not
