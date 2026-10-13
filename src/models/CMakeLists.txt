@@ -9,6 +9,9 @@ target_link_libraries(ninfer_model_runtime
   PUBLIC ninfer_model_loading ninfer_ops ninfer_runtime_support
   PRIVATE ninfer_media_decode ninfer_jinja)
 
+include(gemma4/loading_sources.cmake)
+include(gemma4/frontend_sources.cmake)
+include(gemma4/runtime_sources.cmake)
 include(qwen3_5/loading_sources.cmake)
 include(qwen3_5/frontend_sources.cmake)
 include(qwen3_5/execution_sources.cmake)

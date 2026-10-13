@@ -15,6 +15,7 @@ add_library(ninfer_engine STATIC
   engine/engine.cpp
 )
 ninfer_internal_includes(ninfer_engine)
+target_sources(ninfer_engine PRIVATE "${CMAKE_CURRENT_LIST_DIR}/engine/gemma_instance.cpp")
 target_include_directories(ninfer_engine PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(ninfer_engine PRIVATE
   ninfer_model_runtime
