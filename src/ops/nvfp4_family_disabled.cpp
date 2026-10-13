@@ -20,7 +20,8 @@ namespace ninfer::ops::detail {
 
 // -- ops/linear/nvfp4/nvfp4_format.h --
 
-Nvfp4WeightGeometry validate_nvfp4_weight(const Weight& weight, const char* operation) {
+Nvfp4WeightGeometry validate_nvfp4_weight(const Weight& weight, const char* operation,
+                                          bool stacked) {
     throw std::invalid_argument(
         "NVFP4-family ops are Blackwell-only (sm_120a) and are not built into this Ada "
         "(sm_89) target");

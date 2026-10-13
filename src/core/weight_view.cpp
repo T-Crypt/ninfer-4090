@@ -133,6 +133,18 @@ WeightGeometry weight_geometry(QType format, QuantLayout layout,
         out.scale_bytes_per_row = 2;
         out.code_bytes          = out.elements;
         out.scale_offset        = aligned(out.code_bytes, 256);
+    } else if (layout == QuantLayout::RowGroup) {
+        // Signed 4-bit codes in groups of 32 with one binary16 scale each; rows carry no padding, so
+        // a row is addressable by its index alone (K/2 code bytes, K/32 scale words).
+        if (format != QType::Q4_G32_FP16_ROWS) {
+            throw std::invalid_argument("RowGroup requires the row-grouped 4-bit format");
+        }
+        if (k % 32 != 0) { throw std::invalid_argument("RowGroup requires K%32=0"); }
+        out.group_size          = 32;
+        out.code_bytes_per_row  = k / 2;
+        out.scale_bytes_per_row = k / 32 * 2;
+        out.code_bytes          = mul(n, out.code_bytes_per_row);
+        out.scale_offset        = aligned(out.code_bytes, 256);
     } else if (layout == QuantLayout::BlockScaleK16M128x4) {
         if (format != QType::NVFP4 || n % 128 || k % 64) {
             throw std::invalid_argument("NVFP4 BlockScale requires N%128=0 and K%64=0");
@@ -262,8 +274,15 @@ Weight native_weight(const WeightView& view, float input_divisor) {
         throw std::invalid_argument("quantized native Weight requires unchanged parent K");
     }
     const auto planes = weight_row_planes(region);
-    if ((g.layout == QuantLayout::RowScale || g.layout == QuantLayout::BlockScaleK16M128x4) &&
-        !is_complete_weight(view)) {
+    // A RowScale parent is one BF16 multiplier per row and nothing else, and the check above already
+    // requires the view to keep the parent's whole K, so a row slice is a complete operand: its codes
+    // and its scale line both start at the slice's first row. That is how the Gemma attention
+    // projections are bound, as slices of one fused input projection, and it is also how the
+    // reference engines read them (gewell issues one linear per projection).
+    //
+    // A BlockScaleK16M128x4 parent carries a divisor per parent tensor, which a row slice cannot
+    // re-derive, so it still requires the complete parent.
+    if (g.layout == QuantLayout::BlockScaleK16M128x4 && !is_complete_weight(view)) {
         throw std::invalid_argument(
             "this native Weight input requires a complete FP8/NVFP4 parent");
     }
