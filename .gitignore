@@ -34,7 +34,6 @@ venv/
 *.ninfer.conversion.json
 /models/
 out/
-models/
 vcpkg_installed/
 
 # Local workspace and transient runtime output
