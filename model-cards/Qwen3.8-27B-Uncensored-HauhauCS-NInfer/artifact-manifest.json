@@ -1,0 +1,83 @@
+{
+  "schema": "ninfer.artifact-manifest",
+  "schema_version": 1,
+  "artifact": {
+    "filename": "qwen3_8_27b_hauhaucs.ninfer",
+    "bytes": 20437336576,
+    "sha256": "c58617dd7dc5c171eb90f48dd8e0a1db6d1669bed3dccdf4e431aff014c992b6",
+    "container_version": 2,
+    "model_id": "qwen3.8-27b",
+    "weights_id": "groupwise-int",
+    "target_key": "qwen3_8_27b"
+  },
+  "source": {
+    "base": {
+      "repo_id": "HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF",
+      "revision": "993a5971fda8f30dd1b7eb2654792ba4415c7460",
+      "file": "Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-Q8_K_P.gguf",
+      "file_sha256": "4e7735df4d1e2ec721f2551f531b815702a2f89123238c564797eda4b0304bc",
+      "license": "Apache-2.0",
+      "note": "GGUF only. Dequantized and inverted to a Hugging Face BF16 tree by tools/convert/gguf_to_hf before this conversion."
+    },
+    "reference": {
+      "repo_id": "Qwen/Qwen3.8-27B",
+      "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+      "use": "six frontend files and all 333 model.visual.* tensors",
+      "license": "Apache-2.0"
+    },
+    "dflash2": {
+      "repo_id": "z-lab/Qwen3.8-27B-DFlash2",
+      "revision": "50307d4c4cde6860d4eee73e2547cd786fe8e8a4",
+      "license": "Apache-2.0",
+      "note": "carried in the artifact, unused when served with --spec mtp"
+    }
+  },
+  "conversion": {
+    "recipe_id": "qwen3_8_27b-v2",
+    "converter_repository": "https://github.com/T-Crypt/ninfer-4090",
+    "converter_revision": "b9b9e19ddc3e9ca8ecee6288346f4d43336c60bc",
+    "gguf_to_hf_revision": "dbc56a6da6ffcded69cf64d720e3d793f3ae3f9a",
+    "device": "cuda",
+    "elapsed_seconds": 181.75010644800022,
+    "gpu": "NVIDIA GeForce RTX 4090"
+  },
+  "runtime": {
+    "repository": "https://github.com/sergiuszm/ninfer-4090",
+    "minimum_revision": "46645ada79a3c603fc8a6bfd3e4c9d194850de13",
+    "cuda_architecture": "sm_89",
+    "kv_dtype": "rk4v4-e8",
+    "speculative_decoding": {
+      "mode": "mtp",
+      "draft_tokens": 3,
+      "lm_head_draft": true
+    }
+  },
+  "inventory": {
+    "objects": 1190,
+    "tensors": 1184,
+    "resources": 6,
+    "formats": {
+      "BF16": 627,
+      "FP32": 96,
+      "I32": 1,
+      "Q4G64_F16S": 183,
+      "Q5G64_F16S": 246,
+      "Q6G64_F16S": 1,
+      "W8G32_F16S": 30
+    },
+    "layouts": {
+      "contiguous-le-v1": 724,
+      "row-split-k128-v1": 460
+    },
+    "encodings": {
+      "raw-bytes-v1": 6
+    },
+    "bytes": {
+      "tensor": 20424296864,
+      "resource": 12837177,
+      "object": 20437134041,
+      "payload_span": 20437148160,
+      "alignment": 14119
+    }
+  }
+}
