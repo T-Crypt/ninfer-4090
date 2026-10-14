@@ -209,6 +209,30 @@ per profile; each category has fifteen. All output-limit samples remain in the r
 | Structured | 1 / 14 | 1 / 14 | 0 / 15 |
 | Total | 37 / 38 | 37 / 38 | 35 / 40 |
 
+## RTX 4090 bring-up (sm_89 carry, informal smoke)
+
+Not a benchmark: two load probes plus two short generations on aphotic (RTX 4090,
+24 GiB) from branch `ninfer-4090-ext`, 2026-10-14. Same artifact and recipe as above;
+only the execution target differs. Do not compare these figures against the 5090 table.
+
+| Setting | Value |
+|---|---|
+| Artifact | `neroued/Qwen3.6-35B-A3B-NInfer` `qwen3_6_35b_a3b.ninfer`, 22,790,484,480 bytes (21.23 GiB), SHA-256 verified on download |
+| Binary | `ninfer-serve-v3-23f7cfef` (the v3 binary already serving Qwen3.8-27B) |
+| Flags | `--kv-dtype rk4v4-e8 --spec mtp --draft-tokens 3 --lm-head-draft`, concurrency 1, prefill chunk 1024 |
+| Load | ~48 s both probes, weights 20.6 GiB resident |
+| 32,768 ctx | KV runtime 471.8 MiB, 2.24 GiB free; host KV pinned 8.00 GiB |
+| 131,072 ctx | KV runtime 1.01 GiB, 1.69 GiB free; host KV pinned 8.00 GiB |
+| 262,144 ctx | Not attempted: 1.69 GiB free at 131K leaves no room, so it is treated as not fitting |
+| Text | Coherent reply, natural stop on the second probe |
+| Speculation | One probe: 115 draft tokens proposed, 80 accepted (~70%) |
+| Decode | ~460-512 tok/s across the two short probes (direction only, n=2) |
+
+Two observations, one sample each: with a small `max_tokens` budget the thinking trace can
+consume the whole budget (finish `length`, empty content), matching the known Qwen thinking-budget
+behavior; and host-side pinned KV stayed at 8.00 GiB for both context sizes. Untested here:
+vision input, tool calls, `int8`/`fp8` KV, DFlash (no source), and any formal sweep.
+
 ## Reproduction and reports
 
 Run from the repository root using Python 3.11 and the explicit artifact above.
