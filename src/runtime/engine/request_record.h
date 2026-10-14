@@ -191,10 +191,6 @@ struct RequestRecord {
     RequestHostTiming host_timing;
     SpeculativeStats speculative_stats;
     MaterializationDiagnostics materialization_diagnostics;
-    // Fork-local session persistence: the catalog slot that retained the finished session and
-    // its ledger digest, populated at terminal settlement when the continuation is catalogued.
-    std::int32_t retained_slot = -1;
-    std::string retained_session_digest;
 
     std::mutex mutex;
     std::condition_variable cv;

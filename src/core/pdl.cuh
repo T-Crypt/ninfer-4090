@@ -45,7 +45,6 @@ launch_dependent(const LaunchConfig& launch, void (*kernel)(KernelArgs...), Call
     }
 
     return cudaLaunchKernelEx(&config, kernel, std::forward<CallArgs>(args)...);
-#endif
 }
 
 // Every producer CTA must call this at least once or exit. This enables dependent scheduling but

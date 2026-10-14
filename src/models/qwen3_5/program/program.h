@@ -11,8 +11,6 @@
 #include <memory>
 #include <optional>
 #include <span>
-#include <string>
-#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -54,33 +52,6 @@ struct GraphExecutionProfile {
     std::uint32_t min            = 0;
     std::uint32_t max            = 0;
     std::uint32_t topology_class = 0;
-};
-
-// One retained lane's complete session image (host bytes) for save/restore persistence. The
-// byte layout is a target-private format; callers treat it as opaque and durable only across
-// processes serving the identical model and KV configuration.
-struct RetainedSessionSnapshot {
-    std::vector<std::uint8_t> bytes;
-    std::uint32_t tokens = 0;
-    std::string session_digest;
-};
-
-// Fork-local: cumulative transfer volume moved by session save/restore. These copies run outside
-// the context-cache transactions, so their pages never appear in the transaction-observed stats;
-// the Engine adds this on top when it publishes runtime stats.
-struct SessionSnapshotTraffic {
-    std::uint64_t main_kv_d2h_pages    = 0;
-    std::uint64_t main_kv_h2d_pages    = 0;
-    std::uint64_t backend_kv_d2h_pages = 0;
-    std::uint64_t backend_kv_h2d_pages = 0;
-    std::uint64_t main_kv_d2h_bytes    = 0;
-    std::uint64_t main_kv_h2d_bytes    = 0;
-    std::uint64_t backend_kv_d2h_bytes = 0;
-    std::uint64_t backend_kv_h2d_bytes = 0;
-    std::uint64_t state_d2h_count      = 0;
-    std::uint64_t state_h2d_count      = 0;
-    std::uint64_t state_d2h_bytes      = 0;
-    std::uint64_t state_h2d_bytes      = 0;
 };
 
 // Program-minted shortlist metadata. It only narrows catalog inspection; Program still performs

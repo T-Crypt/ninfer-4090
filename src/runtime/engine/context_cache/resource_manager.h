@@ -13,7 +13,6 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <limits>
 #include <optional>
 #include <span>
@@ -432,9 +431,6 @@ public:
         }
         validate_choice(choice, resource_revision);
         MaterializationRecord record = take_materialization_record(choice);
-        // Fork-local, and order-critical: the observer reads the record's claim spans, so it
-        // must run before upstream moves the record into the open transaction.
-        observe_planned_evictions(record.private_claims);
         transaction_.template emplace<MaterializationRecord>(std::move(record));
         MaterializationRecord& open = std::get<MaterializationRecord>(transaction_);
         reserve_logical_materialization(open);
@@ -909,8 +905,6 @@ public:
             throw std::logic_error("selected shared replacement changed before reservation");
         }
 
-        // Fork-local, and order-critical: see the materialization path above.
-        observe_planned_evictions(record.private_claims);
         transaction_.template emplace<ActiveCaptureRecord>(std::move(record));
         ActiveCaptureRecord& open = std::get<ActiveCaptureRecord>(transaction_);
         reserve_logical_active_capture(open);
@@ -1127,99 +1121,6 @@ public:
 
     [[nodiscard]] LogicalLaneState lane_state(LaneId lane) const noexcept {
         return lane.value < lane_count_ ? lanes_[lane.value] : LogicalLaneState::Free;
-    }
-
-    // Fork-local session persistence (disk slots): the Engine addresses retained sessions by
-    // private catalog index. These entry points expose read-only slot state, adopt a restored
-    // continuation into a vacant cell, surrender a catalogued one for release, and observe
-    // evictions so a bound session can be spilled to disk before its state is destroyed.
-
-    struct CatalogSlotView {
-        CatalogState state              = CatalogState::Vacant;
-        std::uint64_t id                = 0;
-        std::uint64_t revision          = 0;
-        std::uint32_t active_references = 0;
-        const ContinuationHandle* handle = nullptr;
-    };
-
-    [[nodiscard]] std::uint32_t catalog_capacity() const noexcept { return catalog_count_; }
-
-    [[nodiscard]] CatalogSlotView catalog_slot(std::uint32_t slot) const noexcept {
-        if (slot >= catalog_count_) { return {}; }
-        const CatalogEntry& entry = catalog_[slot];
-        return CatalogSlotView{
-            .state             = entry.state,
-            .id                = entry.id,
-            .revision          = entry.revision,
-            .active_references = entry.summary.active_references,
-            .handle            = entry.handle ? &*entry.handle : nullptr,
-        };
-    }
-
-    [[nodiscard]] std::optional<std::uint32_t> lane_publication_slot(LaneId lane) const noexcept {
-        if (lane.value >= lane_count_ || !active_[lane.value].occupied) { return std::nullopt; }
-        return active_[lane.value].publication_slot;
-    }
-
-    // Adopts a Program-restored continuation into a vacant catalog cell. Throws (leaving the
-    // handle with the caller) when the cell or summary is unusable; never throws after taking
-    // ownership of the handle.
-    void adopt_restored(std::uint32_t slot, ContinuationHandle&& handle,
-                        const ContinuationSummary& summary) {
-        if (slot >= catalog_count_) {
-            throw std::invalid_argument("restored continuation slot is out of range");
-        }
-        CatalogEntry& entry = catalog_[slot];
-        if (!std::holds_alternative<std::monostate>(transaction_) ||
-            entry.state != CatalogState::Vacant || entry.handle ||
-            !valid_continuation_summary(summary) || summary.active_references != 0) {
-            throw std::logic_error("restored continuation has no vacant catalog cell");
-        }
-        entry.state = CatalogState::Catalogued;
-        entry.id    = next_continuation_id_++;
-        if (entry.id == 0) { entry.id = next_continuation_id_++; }
-        entry.session.reset();
-        entry.retention = RetentionClass::RecentPrivate;
-        assign_continuation_summary(entry.summary, summary);
-        migrate_observations(entry, summary, entry.retention);
-        advance_revision(entry.revision);
-        entry.handle.emplace(std::move(handle));
-    }
-
-    // Surrenders one idle catalogued continuation: the caller releases the returned handle at
-    // the Program and the cell becomes vacant.
-    [[nodiscard]] ContinuationHandle take_catalogued(std::uint32_t slot) {
-        if (slot >= catalog_count_) {
-            throw std::invalid_argument("catalog slot is out of range");
-        }
-        CatalogEntry& entry = catalog_[slot];
-        if (!std::holds_alternative<std::monostate>(transaction_) ||
-            entry.state != CatalogState::Catalogued || !entry.handle ||
-            entry.summary.active_references != 0) {
-            throw std::logic_error("catalog slot is not releasable");
-        }
-        ContinuationHandle handle = std::move(*entry.handle);
-        erase_session_if_owner(entry.id);
-        clear_catalog_entry(entry);
-        return handle;
-    }
-
-    // Called with each catalogued continuation a reserved transaction plans to EVICT, before
-    // any physical state is destroyed. An aborted transaction leaves the session alive, so a
-    // spurious observation costs one redundant (still valid) spill file.
-    using EvictionObserver = std::function<void(std::uint32_t, const ContinuationHandle&)>;
-    // Fork-local: fires whenever a catalog cell stops holding the session it held, by any
-    // route - eviction, consumption, release, abort, cancel or cleanup. Session state the
-    // Engine keys by cell (the slot file binding) must die here, or it outlives its session
-    // and gets applied to whichever session lands in the cell next.
-    using SlotReleaseObserver = std::function<void(std::uint32_t)>;
-
-    void set_eviction_observer(EvictionObserver observer) {
-        eviction_observer_ = std::move(observer);
-    }
-
-    void set_slot_release_observer(SlotReleaseObserver observer) {
-        slot_release_observer_ = std::move(observer);
     }
 
     void clear_after_program_cleanup() noexcept {
@@ -1650,7 +1551,6 @@ private:
     }
 
     void clear_catalog_entry(CatalogEntry& entry) noexcept {
-        notify_slot_released(entry);
         entry.state = CatalogState::Vacant;
         entry.id    = 0;
         entry.summary.endpoint.reset();
@@ -1662,17 +1562,6 @@ private:
         entry.observations.clear();
         entry.retention = RetentionClass::RecentPrivate;
         advance_revision(entry.revision);
-    }
-
-    // catalog_ is contiguous, so the entry reference recovers its own cell index. Called
-    // before the entry is reset so an observer can still read it.
-    void notify_slot_released(const CatalogEntry& entry) const noexcept {
-        if (!slot_release_observer_ || catalog_.empty()) { return; }
-        const std::ptrdiff_t index = &entry - catalog_.data();
-        if (index < 0 || static_cast<std::size_t>(index) >= catalog_.size()) { return; }
-        try {
-            slot_release_observer_(static_cast<std::uint32_t>(index));
-        } catch (...) {}
     }
 
     void clear_shared_entry(SharedCatalogEntry& entry) noexcept {
@@ -2364,24 +2253,6 @@ private:
             .diagnostics          = choice.diagnostics_,
             .demand               = std::move(choice.demand_),
         };
-    }
-
-    // Fork-local: report each private owner a reserved transaction plans to evict while its
-    // physical state is still intact, so the Engine can spill a slot-bound session to disk.
-    // Upstream replaced the parallel claim-slot/disposition arrays with a vector of OwnerClaim
-    // carrying VictimDisposition, so this walks the claims and takes the slot from the
-    // capability. Same contract as before: observe planned evictions while the physical state
-    // is still intact.
-    void observe_planned_evictions(const std::vector<OwnerClaim>& claims) noexcept {
-        if (!eviction_observer_) { return; }
-        for (const OwnerClaim& claim : claims) {
-            if (claim.disposition != VictimDisposition::Evicted) { continue; }
-            const std::uint32_t slot = claim.capability.slot;
-            if (slot >= catalog_count_ || !catalog_[slot].handle) { continue; }
-            try {
-                eviction_observer_(slot, *catalog_[slot].handle);
-            } catch (...) {}
-        }
     }
 
     void reserve_logical_materialization(const MaterializationRecord& record) noexcept {
@@ -3509,8 +3380,6 @@ private:
     ContextMachineCostModel cost_model_;
     Planner planner_;
     CapturePlanner capture_planner_;
-    EvictionObserver eviction_observer_;
-    SlotReleaseObserver slot_release_observer_;
     RuntimeStats context_stats_;
     std::uint64_t next_continuation_id_  = 1;
     std::uint64_t next_shared_prefix_id_ = 1;

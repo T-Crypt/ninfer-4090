@@ -13,23 +13,12 @@
 #include "runtime/engine/model_instance.h"
 
 #include <algorithm>
-#include <chrono>
-#include <condition_variable>
-#include <cstdio>
-#include <deque>
-#include <filesystem>
-#include <fstream>
 #include <limits>
-#include <mutex>
-#include <span>
-#include <sstream>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <type_traits>
 #include <utility>
 #include <variant>
-#include <vector>
 
 namespace ninfer {
 namespace {
@@ -163,14 +152,6 @@ GenerationResult GenerationHandle::wait(OutputSink* sink, const CancellationView
     return impl->wait(sink, cancellation);
 }
 
-namespace {
-
-std::string slot_model_binding(const LoadSummary& load) {
-    return load.target + '\n' + load.model_id + '\n' + load.weights_id;
-}
-
-} // namespace
-
 class Engine::Impl {
 public:
     using GenerationCore      = runtime::EngineCore<runtime::ModelInstance>;
@@ -182,6 +163,16 @@ public:
                               std::unique_ptr<GemmaScoringCore>>;
     using Active = std::variant<std::unique_ptr<runtime::ModelInstance>,
                                 std::unique_ptr<runtime::GemmaInstance>>;
+
+    // Every loaded instance reports its context capacity; the instance types differ, so it is
+    // reached by a visit.
+    [[nodiscard]] std::uint32_t active_capacity() const {
+        return std::visit(
+            [](const auto& instance) -> std::uint32_t {
+                return instance == nullptr ? 0 : static_cast<std::uint32_t>(instance->capacity);
+            },
+            active);
+    }
 
     explicit Impl(EngineOptions engine_options)
         : options(runtime::normalize_engine_options(std::move(engine_options))),
@@ -232,33 +223,9 @@ public:
     ~Impl() noexcept {
         device.bind_to_current_thread_noexcept();
         core.emplace<std::monostate>();
-        stop_writer();
         try {
             device.synchronize();
         } catch (...) {}
-    }
-
-    // Auto-save writer: eviction spills enqueue (path, snapshot) here; one background thread
-    // publishes each file with the same write-then-rename discipline as an explicit save.
-    struct PendingWrite {
-        std::string path;
-        targets::qwen3_6::RetainedSessionSnapshot snapshot;
-    };
-
-    void enqueue_write(std::string path, targets::qwen3_6::RetainedSessionSnapshot&& snapshot) {
-        std::unique_lock lock(writer_mutex);
-        if (!writer.joinable()) { writer = std::thread([this] { writer_loop(); }); }
-        pending_writes.push_back(PendingWrite{std::move(path), std::move(snapshot)});
-        lock.unlock();
-        writer_cv.notify_one();
-    }
-
-    // Blocks until every enqueued auto-save has been published. Explicit slot operations call
-    // this before touching files so a pending write can never be read stale or interleave with
-    // a client save of the same path.
-    void drain_writes() {
-        std::unique_lock lock(writer_mutex);
-        writer_cv.wait(lock, [this] { return pending_writes.empty() && !write_in_flight; });
     }
 
     EngineOptions options;
@@ -267,80 +234,6 @@ public:
     LoadSummary load;
     ModelSamplingDefaults sampling_defaults;
     Core core;
-
-    std::mutex writer_mutex;
-    std::condition_variable writer_cv;
-    std::deque<PendingWrite> pending_writes;
-    bool write_in_flight = false;
-    bool writer_stop     = false;
-    std::thread writer;
-    SlotSpillGuard spill_guard;
-
-    // Every instance answers these; the frontend's own type differs, so it is reached by a visit.
-    [[nodiscard]] std::uint32_t active_capacity() const {
-        return std::visit([](const auto& instance) { return instance->capacity; }, active);
-    }
-
-private:
-    void writer_loop() {
-        std::unique_lock lock(writer_mutex);
-        while (true) {
-            writer_cv.wait(lock, [this] { return writer_stop || !pending_writes.empty(); });
-            if (pending_writes.empty()) { break; }
-            PendingWrite item = std::move(pending_writes.front());
-            pending_writes.pop_front();
-            write_in_flight = true;
-            lock.unlock();
-
-            SlotAutoSaveEvent event;
-            event.path         = item.path;
-            event.tokens       = item.snapshot.tokens;
-            event.bytes        = item.snapshot.bytes.size();
-            const auto started = std::chrono::steady_clock::now();
-            try {
-                if (const std::optional<std::uint32_t> deeper =
-                        spill_guard.blocks(item.path, item.snapshot.tokens)) {
-                    // A stale copy of the session must not roll the file back (D3).
-                    event.skipped_behind_tokens = deeper;
-                } else {
-                    write_snapshot_file(item.path, item.snapshot.bytes);
-                    spill_guard.note_spilled(item.path, item.snapshot.tokens);
-                }
-            } catch (const std::exception& error) {
-                event.error = error.what();
-            } catch (...) {
-                event.error = "unknown auto-save failure";
-            }
-            event.seconds =
-                std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
-            if (options.auto_save_listener) {
-                try {
-                    options.auto_save_listener(event);
-                } catch (...) {}
-            }
-
-            lock.lock();
-            write_in_flight = false;
-            writer_cv.notify_all();
-        }
-    }
-
-    void stop_writer() noexcept {
-        {
-            std::scoped_lock lock(writer_mutex);
-            writer_stop = true;
-        }
-        writer_cv.notify_all();
-        if (writer.joinable()) {
-            try {
-                writer.join();
-            } catch (...) {}
-        }
-    }
-
-public:
-    static void write_snapshot_file(const std::string& path,
-                                    const std::vector<std::uint8_t>& bytes);
 };
 
 Engine::Engine(EngineOptions options) {
@@ -579,20 +472,6 @@ MediaCacheSummary Engine::media_cache_summary() const {
                       impl_->active);
 }
 
-bool Engine::healthy() const {
-    if (impl_ == nullptr) { return false; }
-    return std::visit(
-        [](const auto& core) -> bool {
-            using CoreState = std::remove_cvref_t<decltype(core)>;
-            if constexpr (std::is_same_v<CoreState, std::monostate>) {
-                return false;
-            } else {
-                return core->healthy();
-            }
-        },
-        impl_->core);
-}
-
 RuntimeStats Engine::runtime_stats() const {
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
     return std::visit(
@@ -602,128 +481,6 @@ RuntimeStats Engine::runtime_stats() const {
                 throw std::logic_error("Engine core is unavailable");
             } else {
                 return core->runtime_stats();
-            }
-        },
-        impl_->core);
-}
-
-// Write-then-rename keeps a torn write from ever shadowing a good snapshot at `path`. The
-// staging name embeds the thread id so a concurrent auto-save of the same path never shares a
-// temporary file.
-void Engine::Impl::write_snapshot_file(const std::string& path,
-                                       const std::vector<std::uint8_t>& bytes) {
-    std::ostringstream staging_name;
-    staging_name << path << ".tmp." << std::this_thread::get_id();
-    const std::string staging = staging_name.str();
-    {
-        std::ofstream file(staging, std::ios::binary | std::ios::trunc);
-        file.write(reinterpret_cast<const char*>(bytes.data()),
-                   static_cast<std::streamsize>(bytes.size()));
-        if (!file.good()) {
-            file.close();
-            (void)std::remove(staging.c_str());
-            throw std::invalid_argument("failed to write session snapshot file");
-        }
-    }
-    std::error_code rename_error;
-    std::filesystem::rename(staging, path, rename_error);
-    if (rename_error) {
-        (void)std::remove(staging.c_str());
-        throw std::invalid_argument("failed to publish session snapshot file: " +
-                                    rename_error.message());
-    }
-}
-
-SlotSaveResult Engine::save_slot(std::uint32_t lane, const std::string& path,
-                                 const std::string& expected_digest) {
-    if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
-    const auto started = std::chrono::steady_clock::now();
-    // A pending auto-save of the same path must not land after this explicit save.
-    impl_->drain_writes();
-    const std::string binding = slot_model_binding(impl_->load);
-    targets::qwen3_6::RetainedSessionSnapshot snapshot = std::visit(
-        [&](auto& core) -> targets::qwen3_6::RetainedSessionSnapshot {
-            if constexpr (requires { core->save_retained_lane(lane, binding, expected_digest,
-                                                              path); }) {
-                return core->save_retained_lane(lane, binding, expected_digest, path);
-            } else {
-                throw std::logic_error("session persistence requires a generation Engine");
-            }
-        },
-        impl_->core);
-
-    Impl::write_snapshot_file(path, snapshot.bytes);
-    impl_->spill_guard.note_authoritative(path, snapshot.tokens);
-
-    SlotSaveResult result;
-    result.tokens         = snapshot.tokens;
-    result.bytes          = snapshot.bytes.size();
-    result.session_digest = std::move(snapshot.session_digest);
-    result.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
-    return result;
-}
-
-SlotRestoreResult Engine::restore_slot(std::uint32_t lane, const std::string& path) {
-    if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
-    const auto started = std::chrono::steady_clock::now();
-    // A restore must read the newest state, including a spill still in the writer queue.
-    impl_->drain_writes();
-
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) {
-        throw std::invalid_argument("session snapshot file is unavailable");
-    }
-    const std::streamsize size = file.tellg();
-    if (size <= 0) { throw std::invalid_argument("session snapshot file is empty"); }
-    std::vector<std::uint8_t> snapshot(static_cast<std::size_t>(size));
-    file.seekg(0);
-    file.read(reinterpret_cast<char*>(snapshot.data()), size);
-    if (!file.good()) { throw std::invalid_argument("failed to read session snapshot file"); }
-    file.close();
-
-    const std::string binding = slot_model_binding(impl_->load);
-    auto restored = std::visit(
-        [&](auto& core) -> std::pair<std::uint32_t, std::string> {
-            const std::span<const std::uint8_t> bytes(snapshot.data(), snapshot.size());
-            if constexpr (requires { core->restore_retained_lane(lane, bytes, binding, path); }) {
-                return core->restore_retained_lane(lane, bytes, binding, path);
-            } else {
-                throw std::logic_error("session persistence requires a generation Engine");
-            }
-        },
-        impl_->core);
-
-    impl_->spill_guard.note_authoritative(path, restored.first);
-
-    SlotRestoreResult result;
-    result.tokens         = restored.first;
-    result.bytes          = snapshot.size();
-    result.session_digest = std::move(restored.second);
-    result.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
-    return result;
-}
-
-std::uint32_t Engine::erase_slot(std::uint32_t lane, const std::string& expected_digest) {
-    if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
-    return std::visit(
-        [&](auto& core) -> std::uint32_t {
-            if constexpr (requires { core->erase_retained_lane(lane, expected_digest); }) {
-                return core->erase_retained_lane(lane, expected_digest);
-            } else {
-                throw std::logic_error("session persistence requires a generation Engine");
-            }
-        },
-        impl_->core);
-}
-
-std::vector<SlotState> Engine::slot_states() const {
-    if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
-    return std::visit(
-        [](const auto& core) -> std::vector<SlotState> {
-            if constexpr (requires { core->slot_states(); }) {
-                return core->slot_states();
-            } else {
-                throw std::logic_error("session persistence requires a generation Engine");
             }
         },
         impl_->core);
@@ -754,5 +511,27 @@ void Engine::reset_memory_peaks() noexcept {
         },
         impl_->core);
 }
+
+bool Engine::healthy() const {
+    // A latched core failure or shutdown is the whole of engine health on this build.
+    return is_available();
+}
+
+// Session slot persistence (disk slots) belongs to the pre-v3 engine, whose targets runtime this
+// build no longer carries. The API stays for the serve surface's compatibility: state queries
+// report no slots, and mutating calls fail loudly rather than pretending to persist.
+SlotSaveResult Engine::save_slot(std::uint32_t, const std::string&, const std::string&) {
+    throw std::runtime_error("session slot persistence is unavailable on this build");
+}
+
+SlotRestoreResult Engine::restore_slot(std::uint32_t, const std::string&) {
+    throw std::runtime_error("session slot persistence is unavailable on this build");
+}
+
+std::uint32_t Engine::erase_slot(std::uint32_t, const std::string&) {
+    throw std::runtime_error("session slot persistence is unavailable on this build");
+}
+
+std::vector<SlotState> Engine::slot_states() const { return {}; }
 
 } // namespace ninfer

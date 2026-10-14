@@ -893,13 +893,13 @@ public:
     }
 
     void activate(KVAddressSpaceHandle handle, std::uint32_t entitlement,
-                  std::int32_t execution_row, cudaStream_t stream = nullptr) {
+                  std::int32_t execution_row) {
         Address& address = require(handle);
         if (entitlement < address.page_count) {
             throw std::logic_error("KV address space is not activatable");
         }
         auto reservation = prepare_activation(handle, entitlement, execution_row);
-        commit_activation(std::move(reservation), stream);
+        commit_activation(std::move(reservation));
     }
 
     [[nodiscard]] KVActivationReservation

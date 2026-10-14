@@ -611,14 +611,6 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
                     continue;
                 }
                 unique.push_back(state);
-                // A checkpoint another owner also references is not this sequence's to release, so
-                // it is not part of its exclusive entitlement; the actual-side accounting in
-                // sequence_exclusive_state_resources applies the same filter, and the rewrite
-                // restore branch below already does this. Without it a host-demoted long anchor
-                // shared with a published prefix is counted as one host StateImage the sequence
-                // does not own, start_request rejects the entitlement, and the engine latches
-                // (sergiuszm/ninfer-4090#9).
-                if (!state_exclusive_to_sequence(*source, state)) { continue; }
                 const StateReplicaResidency residency = state_store->residency(state);
                 if (residency == StateReplicaResidency::DeviceOnly ||
                     residency == StateReplicaResidency::Both) {

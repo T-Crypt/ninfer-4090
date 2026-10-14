@@ -59,27 +59,6 @@ public:
         bool current_session_binding = false;
     };
 
-    /**
-     * The most reuse any candidate offered to the planner. Candidates are built upstream,
-     * before planning, so this is what reuse was ON THE TABLE - independent of what the
-     * search then did with it.
-     *
-     * The first version of this hooked assess_target instead and always read 0: those
-     * targets are eviction alternatives, not reuse candidates, and targets_evaluated
-     * already starts at candidates.size() precisely because the candidates were scored
-     * elsewhere. A positive control caught it - a request that demonstrably reused 40,051
-     * tokens still reported 0.
-     */
-    [[nodiscard]] static std::uint32_t
-    best_offered_reuse(std::span<const CandidateInput> candidates) noexcept {
-        std::uint32_t best = 0;
-        for (const CandidateInput& input : candidates) {
-            if (input.candidate == nullptr) { continue; }
-            best = std::max(best, input.candidate->summary().reusable_prompt_tokens);
-        }
-        return best;
-    }
-
     struct LogicalGoal {
         std::uint32_t publication_slot = std::numeric_limits<std::uint32_t>::max();
     };
@@ -211,7 +190,6 @@ public:
                     needs_optional_search ? MaterializationStopReason::TimeBudget
                                           : MaterializationStopReason::NoPressure,
                     false);
-                diagnostics.best_reuse_prompt_tokens = best_offered_reuse(candidates);
                 diagnostics.budget_exhausted  = needs_optional_search;
                 diagnostics.search_stop_phase = needs_optional_search
                                                     ? MaterializationSearchPhase::Setup
@@ -747,7 +725,6 @@ public:
         MaterializationDiagnostics diagnostics = make_diagnostics(
             incumbent.cost, targets_evaluated, projection_work, planning_started, search_elapsed_ns,
             stop_reason, budget_exhausted, incumbent.degradation_units, incumbent.root_maximal);
-        diagnostics.best_reuse_prompt_tokens = best_offered_reuse(candidates);
 
         diagnostics.initial_predicted_total_ns = initial_cost_ns;
         diagnostics.first_improvement_ns       = first_improvement_ns;

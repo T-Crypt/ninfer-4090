@@ -832,10 +832,6 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->max_concurrency     = inputs.max_concurrency;
     impl->prefill_chunk       = inputs.prefill_chunk;
     impl->draft_window        = inputs.draft_window;
-    // DFlash keeps checkpoint state in its own cyclic mirror that only covers the resident
-    // checkpoint; older ring entries could not rebuild it, so the ring stays off there.
-    impl->turn_checkpoint_ring =
-        inputs.speculative_backend == SpeculativeBackend::DFlash ? 0 : inputs.turn_checkpoint_ring;
     impl->speculative_backend = inputs.speculative_backend;
     impl->proposal_head       = inputs.proposal_head;
     impl->features            = inputs.features;
@@ -862,17 +858,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
                     const std::uint64_t final_visible = std::min<std::uint64_t>(
                         impl->capacity,
                         static_cast<std::uint64_t>(profile.max) + 2ULL * impl->draft_window);
-#ifdef NINFER_SM86
-                    if (final_visible <= 4096) {
-                        // The reduced-startup graph set still consumes 35.8 MiB at C1/K3 and
-                        // 43.1 MiB at C1/K4 on SM86. K2 retains the smaller qualified allowance;
-                        // reserve one 64 MiB class for K3 and deeper captures.
-                        return (impl->draft_window >= 3 ? 64ULL : 16ULL) * kMiB;
-                    }
-                    return 86ULL * kMiB;
-#else
                     return (final_visible <= 4096 ? 12ULL : 82ULL) * kMiB;
-#endif
                 },
                 "MTP graph allowance");
             impl->graph_allowance_bytes = checked_mul(per_batch_allowance, impl->max_concurrency,
@@ -912,7 +898,6 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .max_concurrency     = options.max_concurrency,
         .prefill_chunk       = std::min(options.prefill_chunk, options.max_context),
         .draft_window        = options.speculative.draft_tokens,
-        .turn_checkpoint_ring = options.turn_checkpoint_ring,
         .speculative_backend = options.speculative.backend,
         .kv_storage          = options.kv_cache,
         .vision_max_tokens   = options.vision_max_tokens > 0 ? options.vision_max_tokens : 8192,
