@@ -2,6 +2,7 @@
 
 #include "models/qwen3_5/execution/parameters.h"
 #include "models/qwen3_5/program/program.h"
+#include "core/device.h"
 
 namespace ninfer::models::qwen3_5::execution {
 
@@ -14,8 +15,8 @@ void attention_projection(const Tensor& hidden, const AttentionParameters& param
                           TextPhase phase = TextPhase::Verify);
 
 void text_rope(const Tensor& positions, const RopeConfig& config, Tensor& query,
-               cudaStream_t stream);
+               DeviceExecutionView execution);
 void text_rope(const Tensor& positions, const RopeConfig& config, Tensor& query, Tensor& key,
-               cudaStream_t stream);
+               DeviceExecutionView execution);
 
 } // namespace ninfer::models::qwen3_5::execution
