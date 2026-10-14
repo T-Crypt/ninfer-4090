@@ -14,14 +14,38 @@ namespace ninfer::ops {
 enum class RmsEpilogue {
     Offset,
     Plain,
-    Gated,
+    Weightless,   // no weight operand; the gain is exactly one
+    Gated,        // SiLU gate
+    GatedSigmoid, // sigmoid gate
 };
+
+__host__ __device__ constexpr bool is_gated(RmsEpilogue epilogue) {
+    return epilogue == RmsEpilogue::Gated || epilogue == RmsEpilogue::GatedSigmoid;
+}
+
+// The weight load is compiled out of the weightless epilogue, so its pointer is never read and may
+// be null. Multiplying by the returned one is exact, so the result is x * inv.
+template <RmsEpilogue Epilogue>
+__device__ __forceinline__ __nv_bfloat162 rmsnorm_weight_pair(const __nv_bfloat162* weight,
+                                                              int index) {
+    if constexpr (Epilogue == RmsEpilogue::Weightless) {
+        return __floats2bfloat162_rn(1.0F, 1.0F);
+    }
+    return weight[index];
+}
+
+template <RmsEpilogue Epilogue>
+__device__ __forceinline__ float rmsnorm_weight_scalar(const __nv_bfloat16* weight, int index) {
+    if constexpr (Epilogue == RmsEpilogue::Weightless) { return 1.0F; }
+    return __bfloat162float(weight[index]);
+}
 
 template <RmsEpilogue Epilogue>
 __device__ __forceinline__ float rmsnorm_epilogue(float x, float inv, float weight, float z) {
     if constexpr (Epilogue == RmsEpilogue::Offset) { weight += 1.0f; }
     float value = x * inv * weight;
     if constexpr (Epilogue == RmsEpilogue::Gated) { value *= silu(z); }
+    if constexpr (Epilogue == RmsEpilogue::GatedSigmoid) { value *= sigmoid(z); }
     return value;
 }
 
@@ -55,8 +79,8 @@ __launch_bounds__(Block) __global__
         if (pair < pairs) {
             values[k] = x[row_base + pair];
             if constexpr (Prefetch) {
-                weights[k] = weight[pair];
-                if constexpr (Epilogue == RmsEpilogue::Gated) { gates[k] = z[row_base + pair]; }
+                weights[k] = rmsnorm_weight_pair<Epilogue>(weight, pair);
+                if constexpr (is_gated(Epilogue)) { gates[k] = z[row_base + pair]; }
             }
             const float2 xf = __bfloat1622float2(values[k]);
             sum += xf.x * xf.x + xf.y * xf.y;
@@ -76,14 +100,14 @@ __launch_bounds__(Block) __global__
             __nv_bfloat162 z_pair{};
             if constexpr (Prefetch) {
                 w_pair = weights[k];
-                if constexpr (Epilogue == RmsEpilogue::Gated) { z_pair = gates[k]; }
+                if constexpr (is_gated(Epilogue)) { z_pair = gates[k]; }
             } else {
-                w_pair = weight[pair];
-                if constexpr (Epilogue == RmsEpilogue::Gated) { z_pair = z[row_base + pair]; }
+                w_pair = rmsnorm_weight_pair<Epilogue>(weight, pair);
+                if constexpr (is_gated(Epilogue)) { z_pair = z[row_base + pair]; }
             }
             const float2 wf = __bfloat1622float2(w_pair);
             float2 zf{0.0f, 0.0f};
-            if constexpr (Epilogue == RmsEpilogue::Gated) { zf = __bfloat1622float2(z_pair); }
+            if constexpr (is_gated(Epilogue)) { zf = __bfloat1622float2(z_pair); }
             out[row_base + pair] =
                 __floats2bfloat162_rn(rmsnorm_epilogue<Epilogue>(xf.x, inv, wf.x, zf.x),
                                       rmsnorm_epilogue<Epilogue>(xf.y, inv, wf.y, zf.y));
@@ -119,11 +143,11 @@ __launch_bounds__(Block) __global__
     float inv                   = lane == 0 ? rsqrtf(sum * (1.0f / 128.0f) + eps) : 0.0f;
     inv                         = __shfl_sync(kFullWarpMask, inv, 0);
 
-    const float2 w0 = __bfloat1622float2(weight[pair0]);
-    const float2 w1 = __bfloat1622float2(weight[pair1]);
+    const float2 w0 = __bfloat1622float2(rmsnorm_weight_pair<Epilogue>(weight, pair0));
+    const float2 w1 = __bfloat1622float2(rmsnorm_weight_pair<Epilogue>(weight, pair1));
     float2 z0{0.0f, 0.0f};
     float2 z1{0.0f, 0.0f};
-    if constexpr (Epilogue == RmsEpilogue::Gated) {
+    if constexpr (is_gated(Epilogue)) {
         z0 = __bfloat1622float2(z[row_base + pair0]);
         z1 = __bfloat1622float2(z[row_base + pair1]);
     }
@@ -165,8 +189,8 @@ __launch_bounds__(Block) __global__
             const int pair = static_cast<int>(threadIdx.x) + k * Block;
             values[k]      = x[row_base + pair];
             if constexpr (Prefetch) {
-                weights[k] = weight[pair];
-                if constexpr (Epilogue == RmsEpilogue::Gated) { gates[k] = z[row_base + pair]; }
+                weights[k] = rmsnorm_weight_pair<Epilogue>(weight, pair);
+                if constexpr (is_gated(Epilogue)) { gates[k] = z[row_base + pair]; }
             }
             const float2 xf = __bfloat1622float2(values[k]);
             sum += xf.x * xf.x + xf.y * xf.y;
@@ -189,14 +213,14 @@ __launch_bounds__(Block) __global__
             __nv_bfloat162 z_pair{};
             if constexpr (Prefetch) {
                 w_pair = weights[k];
-                if constexpr (Epilogue == RmsEpilogue::Gated) { z_pair = gates[k]; }
+                if constexpr (is_gated(Epilogue)) { z_pair = gates[k]; }
             } else {
-                w_pair = weight[pair];
-                if constexpr (Epilogue == RmsEpilogue::Gated) { z_pair = z[row_base + pair]; }
+                w_pair = rmsnorm_weight_pair<Epilogue>(weight, pair);
+                if constexpr (is_gated(Epilogue)) { z_pair = z[row_base + pair]; }
             }
             const float2 wf = __bfloat1622float2(w_pair);
             float2 zf{0.0f, 0.0f};
-            if constexpr (Epilogue == RmsEpilogue::Gated) { zf = __bfloat1622float2(z_pair); }
+            if constexpr (is_gated(Epilogue)) { zf = __bfloat1622float2(z_pair); }
             out[row_base + pair] =
                 __floats2bfloat162_rn(rmsnorm_epilogue<Epilogue>(xf.x, inv, wf.x, zf.x),
                                       rmsnorm_epilogue<Epilogue>(xf.y, inv, wf.y, zf.y));
@@ -233,11 +257,11 @@ __launch_bounds__(512) __global__
     __syncthreads();
     const float inv = inv_shared;
 
-    const float2 w0 = __bfloat1622float2(weight[pair0]);
-    const float2 w1 = __bfloat1622float2(weight[pair1]);
+    const float2 w0 = __bfloat1622float2(rmsnorm_weight_pair<Epilogue>(weight, pair0));
+    const float2 w1 = __bfloat1622float2(rmsnorm_weight_pair<Epilogue>(weight, pair1));
     float2 z0{0.0f, 0.0f};
     float2 z1{0.0f, 0.0f};
-    if constexpr (Epilogue == RmsEpilogue::Gated) {
+    if constexpr (is_gated(Epilogue)) {
         z0 = __bfloat1622float2(z[row_base + pair0]);
         z1 = __bfloat1622float2(z[row_base + pair1]);
     }
@@ -278,9 +302,9 @@ __launch_bounds__(256) __global__
     for (std::int64_t i = threadIdx.x; i < static_cast<std::int64_t>(d); i += blockDim.x) {
         const std::int64_t index = base + i;
         const float xv           = __bfloat162float(x[index]);
-        const float wv           = __bfloat162float(weight[i]);
+        const float wv           = rmsnorm_weight_scalar<Epilogue>(weight, i);
         float zv                 = 0.0f;
-        if constexpr (Epilogue == RmsEpilogue::Gated) { zv = __bfloat162float(z[index]); }
+        if constexpr (is_gated(Epilogue)) { zv = __bfloat162float(z[index]); }
         out[index] = __float2bfloat16_rn(rmsnorm_epilogue<Epilogue>(xv, inv, wv, zv));
     }
 }

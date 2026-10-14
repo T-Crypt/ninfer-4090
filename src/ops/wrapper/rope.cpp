@@ -13,6 +13,10 @@ namespace {
 
 constexpr std::int32_t kTextHeadDim = 256;
 constexpr std::int32_t kVisionDim   = 72;
+// The proportional Text 1-D domain: the head dimension's own span with fewer rotated pairs.
+constexpr std::int32_t kProportionalHeadDim = 512;
+// The generic kernel's coefficient cache bound (kRopeMaxHalf in ops/kernel/rope.cuh).
+constexpr int kMaxRotatedPairs = 128;
 
 std::int64_t numel_allow_zero(const Tensor& tensor, const char* label) {
     bool zero      = false;
@@ -59,7 +63,11 @@ void require_tensor_layout(const Tensor& tensor, const char* label, std::int32_t
     }
 }
 
-void require_common(const Tensor& positions, int rotary_dim, float theta) {
+void require_common(const Tensor& positions, int rotary_dim, int rotary_pairs, float theta,
+                    DeviceExecutionView execution) {
+    if (execution.multiprocessor_count <= 0) {
+        throw std::invalid_argument("rope: positive multiprocessor count required");
+    }
     if (positions.dtype != DType::I32) {
         throw std::invalid_argument("rope: positions must be I32");
     }
@@ -68,6 +76,9 @@ void require_common(const Tensor& positions, int rotary_dim, float theta) {
     }
     if (rotary_dim <= 0 || (rotary_dim & 1) != 0) {
         throw std::invalid_argument("rope: rotary_dim must be positive and even");
+    }
+    if (rotary_pairs <= 0 || rotary_pairs > rotary_dim / 2 || rotary_pairs > kMaxRotatedPairs) {
+        throw std::invalid_argument("rope: rotary_pairs must be in [1,min(rotary_dim/2,128)]");
     }
 }
 
@@ -80,16 +91,21 @@ void require_positions_storage(const Tensor& positions) {
     }
 }
 
-void require_model_mode(int axes, int rotary_dim, std::int32_t head_dim) {
+void require_model_mode(int axes, int rotary_dim, int rotary_pairs, std::int32_t head_dim) {
     if (axes == 2) {
-        if (head_dim != kVisionDim || rotary_dim != kVisionDim) {
-            throw std::invalid_argument("rope: 2-D Vision mode requires head_dim=rotary_dim=72");
+        if (head_dim != kVisionDim || rotary_dim != kVisionDim || rotary_pairs != kVisionDim / 2) {
+            throw std::invalid_argument(
+                "rope: 2-D Vision mode requires head_dim=rotary_dim=72 and rotary_pairs=36");
         }
         return;
     }
     if (axes == 1 && head_dim == 128 && rotary_dim == 128) { return; }
+    if (axes == 1 && head_dim == kProportionalHeadDim && rotary_dim == kProportionalHeadDim) {
+        return;
+    }
     if (head_dim != kTextHeadDim || rotary_dim > kTextHeadDim) {
-        throw std::invalid_argument("rope: Text mode requires D256 or one-dimensional D128/R128");
+        throw std::invalid_argument(
+            "rope: Text mode requires D256, one-dimensional D128/R128, or the proportional D512");
     }
     if (axes == 3 && rotary_dim != 64) {
         throw std::invalid_argument("rope: 3-D Text MRoPE requires rotary_dim=64");
@@ -98,9 +114,9 @@ void require_model_mode(int axes, int rotary_dim, std::int32_t head_dim) {
 
 } // namespace
 
-void rope(const Tensor& positions, int rotary_dim, float theta, Tensor& q, Tensor& k,
-          cudaStream_t stream) {
-    require_common(positions, rotary_dim, theta);
+void rope(const Tensor& positions, int rotary_dim, int rotary_pairs, float theta, Tensor& q,
+          Tensor& k, DeviceExecutionView execution) {
+    require_common(positions, rotary_dim, rotary_pairs, theta, execution);
     if (q.dtype != DType::BF16 || k.dtype != DType::BF16) {
         throw std::invalid_argument("rope: q/k must be BF16");
     }
@@ -112,7 +128,7 @@ void rope(const Tensor& positions, int rotary_dim, float theta, Tensor& q, Tenso
     const std::int32_t head_dim = axes == 2 ? kVisionDim : q.ne[0];
     const std::int32_t q_heads  = q.ne[1];
     const std::int32_t k_heads  = k.ne[1];
-    require_model_mode(axes, rotary_dim, head_dim);
+    require_model_mode(axes, rotary_dim, rotary_pairs, head_dim);
     require_tensor_layout(q, "q", head_dim, q_heads, tokens);
     require_tensor_layout(k, "k", head_dim, k_heads, tokens);
     if (q_numel == 0) { return; }
@@ -120,11 +136,12 @@ void rope(const Tensor& positions, int rotary_dim, float theta, Tensor& q, Tenso
     if (q.data == nullptr || k.data == nullptr) {
         throw std::invalid_argument("rope: q/k data must be non-null");
     }
-    detail::rope_launch(positions, rotary_dim, theta, q, k, stream);
+    detail::rope_launch(positions, rotary_dim, rotary_pairs, theta, q, k, execution);
 }
 
-void rope(const Tensor& positions, int rotary_dim, float theta, Tensor& x, cudaStream_t stream) {
-    require_common(positions, rotary_dim, theta);
+void rope(const Tensor& positions, int rotary_dim, int rotary_pairs, float theta, Tensor& x,
+          DeviceExecutionView execution) {
+    require_common(positions, rotary_dim, rotary_pairs, theta, execution);
     if (x.dtype != DType::BF16) { throw std::invalid_argument("rope: tensor must be BF16"); }
     (void)numel_allow_zero(positions, "positions");
     const std::int64_t x_numel  = numel_allow_zero(x, "tensor");
@@ -132,12 +149,12 @@ void rope(const Tensor& positions, int rotary_dim, float theta, Tensor& x, cudaS
     const int axes              = position_axes(positions, tokens);
     const std::int32_t head_dim = axes == 2 ? kVisionDim : x.ne[0];
     const std::int32_t heads    = x.ne[1];
-    require_model_mode(axes, rotary_dim, head_dim);
+    require_model_mode(axes, rotary_dim, rotary_pairs, head_dim);
     require_tensor_layout(x, "tensor", head_dim, heads, tokens);
     if (x_numel == 0) { return; }
     require_positions_storage(positions);
     if (x.data == nullptr) { throw std::invalid_argument("rope: tensor data must be non-null"); }
-    detail::rope_single_launch(positions, rotary_dim, theta, x, stream);
+    detail::rope_single_launch(positions, rotary_dim, rotary_pairs, theta, x, execution);
 }
 
 } // namespace ninfer::ops
