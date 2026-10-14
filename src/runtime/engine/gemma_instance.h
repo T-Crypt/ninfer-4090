@@ -297,20 +297,17 @@ public:
     // `adaptive_draft` is false, otherwise a per-lane choice among the MTP ladder's lengths.
     // `cuda_graphs` replays each lane's one-token decode step from a captured CUDA Graph.
     GemmaProgram(const models::gemma4::Model& model, std::int32_t capacity, std::int32_t lanes,
-                 std::uint32_t prefill_chunk, std::uint32_t idle_prefill_chunk,
-                 std::int32_t draft_tokens, bool adaptive_draft, bool cuda_graphs,
-                 KvCacheStorage storage, DeviceContext& device);
+                 std::uint32_t prefill_chunk, std::int32_t draft_tokens, bool adaptive_draft,
+                 bool cuda_graphs, KvCacheStorage storage, DeviceContext& device);
 
     // Scoring.
     [[nodiscard]] std::vector<float>
-    causal_score(PreparedPrompt&& prompt, std::uint32_t first_target, const LogitsSink& logits);
+    causal_score(PreparedPrompt&& prompt, std::uint32_t first_target);
     [[nodiscard]] MemorySummary memory_summary() const;
 
     void reset_memory_peaks() noexcept {}
 
     // Generation.
-    [[nodiscard]] bool consumes_token_masks() const noexcept { return false; }
-
     [[nodiscard]] RequestBasePlan plan_request(const PreparedPrompt& prompt,
                                                const ResolvedExecutionOptions& options);
     [[nodiscard]] std::optional<AdmissionCandidate>
@@ -322,10 +319,9 @@ public:
                                                             const PreparedPrompt& prompt,
                                                             FinalScheduleIntent intent);
     [[noreturn]] PressurePlanningSession begin_pressure_planning(
-        std::span<const AdmissionCandidate* const>, std::span<const PlanningCandidateId>,
+        const std::vector<const AdmissionCandidate*>&, const std::vector<PlanningCandidateId>&,
         std::span<const qwen::ContinuationHandle* const>, std::span<const PlanningOwnerId>,
-        std::span<const qwen::SharedPrefixHandle* const>, std::span<const PlanningOwnerId>,
-        std::span<const PlanningOwnerId>);
+        std::span<const qwen::SharedPrefixHandle* const>, std::span<const PlanningOwnerId>);
     [[nodiscard]] PrefillWork shared_capture_split_prefill_work(const AdmissionCandidate& candidate,
                                                                 const PreparedPrompt& prompt,
                                                                 std::span<const std::uint32_t>);
@@ -346,9 +342,7 @@ public:
     [[nodiscard]] bool has_context_transaction() const noexcept { return transaction_.has_value(); }
 
     [[nodiscard]] PrefillProgress advance_prefill(SequenceHandle sequence,
-                                                  PrefillPace pace = PrefillPace::Idle,
-                                                  ExecutionTiming* failed_timing = nullptr,
-                                                  TokenMaskProvider* masks       = nullptr);
+                                                  ExecutionTiming* failed_timing = nullptr);
     [[noreturn]] qwen::CaptureAssessment inspect_capture(const qwen::CaptureOffer&,
                                                          const qwen::SharedPrefixHandle*,
                                                          const qwen::SharedPrefixHandle*,
@@ -360,7 +354,7 @@ public:
     [[noreturn]] qwen::CapturePressurePlanningSession begin_capture_pressure_planning(
         const qwen::CaptureAssessment&, std::span<const qwen::ContinuationHandle* const>,
         std::span<const PlanningOwnerId>, std::span<const qwen::SharedPrefixHandle* const>,
-        std::span<const PlanningOwnerId>, std::span<const PlanningOwnerId>);
+        std::span<const PlanningOwnerId>);
     [[noreturn]] bool shared_capture_matches(const qwen::CaptureOffer&,
                                              const qwen::SharedPrefixHandle&) const;
     [[noreturn]] void skip_capture(qwen::CaptureOffer&&);
@@ -373,8 +367,7 @@ public:
         std::optional<CheckpointRef>, bool, qwen::CapturePressurePlan&&, CancellationFlagView);
     [[nodiscard]] PendingBatch decode(std::span<const SequenceHandle> sequences,
                                       std::span<const RoundBudget> budgets,
-                                      ExecutionTiming* failed_timing = nullptr,
-                                      TokenMaskProvider* masks       = nullptr);
+                                      ExecutionTiming* failed_timing = nullptr);
     [[nodiscard]] ExecutionTiming
     append_forced_tokens(std::span<const SequenceHandle>, std::span<const TokenId>, std::uint32_t,
                          std::span<const std::optional<std::uint32_t>>, ExecutionTiming* = nullptr);
@@ -450,7 +443,6 @@ private:
     std::uint64_t next_pending_  = 1;
     std::uint64_t open_pending_  = 0;
     std::uint32_t prefill_chunk_ = 0;
-    std::uint32_t idle_chunk_    = 0;
     // The draft-length policy, with speculation: the shared MTP ladder and acceptance model, with
     // round times measured at startup and refined as rounds run.
     std::optional<qwen::MtpDraftPolicy> draft_policy_;

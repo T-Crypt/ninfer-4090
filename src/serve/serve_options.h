@@ -58,11 +58,6 @@ struct ServeOptions {
     KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
     ContextCacheOptions context_cache;
-    // --auto-long-anchors N: propose a private long anchor at each of the last N message
-    // boundaries of every prompt. Unset resolves to the retained-anchor cap
-    // (--max-long-anchors-per-continuation) once the Engine has normalized it; 0 disables.
-    // See resolve_automatic_private_anchors.
-    std::optional<std::uint32_t> auto_long_anchors;
     bool enable_vision      = false;
     std::uint32_t vision_max_tokens = 8192;
     bool use_cuda_graph     = true;

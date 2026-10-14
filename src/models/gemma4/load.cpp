@@ -53,11 +53,12 @@ TextWeights bind_text(Bindings& bindings, const TextConfig& config) {
     const std::uint64_t vocabulary   = config.vocab_size;
 
     TextWeights out;
-    // The embedding's representation is the layout's choice, and it stays in pinned host memory: a
-    // pass gathers one row per token through UVA, which costs nothing measurable beside the layers,
-    // and the 262K-row table then takes no device memory, so a layout can keep it exact (BF16).
+    // The embedding's representation is the layout's choice, and it stays in host memory: a pass
+    // gathers one row per token through UVA, and the 262K-row table then takes no device memory,
+    // so a layout can keep it exact (BF16). This line's materializer keeps it in pageable host
+    // memory (the ext line pins it); the driver stages each gathered row.
     out.token_embedding = bindings.parameter("text/token_embedding", {vocabulary, hidden}, {},
-                                             artifact::Residency::HostPinned);
+                                             artifact::Residency::Host);
     out.output_head     = bindings.parameter("text/output_head", {vocabulary, hidden});
     out.final_norm      = bindings.parameter("text/final_norm", {hidden}, kNormFormat);
 
@@ -246,9 +247,9 @@ resolve_weights(const std::vector<artifact::ParameterReference>& references,
     out.reserve(references.size());
     for (const auto& reference : references) {
         if (reference.residency != artifact::Residency::Device &&
-            reference.residency != artifact::Residency::HostPinned) {
+            reference.residency != artifact::Residency::Host) {
             throw artifact::ArtifactError(reference.name +
-                                          ": only device or pinned host parameters are bound");
+                                          ": only device or host parameters are bound");
         }
         BoundWeight bound;
         bound.name = reference.name;

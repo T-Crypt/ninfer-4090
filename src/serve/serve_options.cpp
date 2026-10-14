@@ -433,11 +433,4 @@ std::uint32_t resolve_automatic_private_anchors(const ServeOptions& options,
     return std::min(options.auto_long_anchors.value_or(cap), cap);
 }
 
-std::uint32_t resolve_automatic_private_anchors(const ServeOptions& options,
-                                                const ContextCacheOptions& resolved) {
-    if (!resolved.enabled || !options.allow_prefix_reuse) { return 0; }
-    const std::uint32_t cap = resolved.max_long_anchors_per_continuation.value_or(0U);
-    return std::min(options.auto_long_anchors.value_or(cap), cap);
-}
-
 } // namespace ninfer::serve
