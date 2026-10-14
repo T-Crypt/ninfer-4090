@@ -64,6 +64,7 @@ void dense_kv_ring_encode_launch(const Tensor& keys, const Tensor& values, const
         encode<DenseKvFormat::Int8Group64, true, DenseKvFormat::Int8Group64, false>(
             keys, values, slots, key_codes, key_scales, value_codes, value_scales, stream);
         return;
+#if NINFER_ENABLE_NVFP4_FAMILY
     case KvCacheStorage::Nvfp4Group16:
         encode<DenseKvFormat::Nvfp4Group16, true, DenseKvFormat::Nvfp4Group16, true>(
             keys, values, slots, key_codes, key_scales, value_codes, value_scales, stream);
@@ -72,6 +73,11 @@ void dense_kv_ring_encode_launch(const Tensor& keys, const Tensor& values, const
         encode<DenseKvFormat::Fp8Row, true, DenseKvFormat::Nvfp4Group16, true>(
             keys, values, slots, key_codes, key_scales, value_codes, value_scales, stream);
         return;
+#else
+    case KvCacheStorage::Nvfp4Group16:
+    case KvCacheStorage::Fp8KeyNvfp4Value:
+        throw std::runtime_error("dense_kv_ring_encode: NVFP4 KV storage requires an sm_120a GPU");
+#endif
     case KvCacheStorage::BFloat16:
         break;
     }
@@ -91,6 +97,7 @@ void dense_kv_ring_decode_launch(const Tensor& key_codes, const Tensor& key_scal
         decode<DenseKvFormat::Int8Group64, true, DenseKvFormat::Int8Group64, false>(
             key_codes, key_scales, value_codes, value_scales, keys, values, stream);
         return;
+#if NINFER_ENABLE_NVFP4_FAMILY
     case KvCacheStorage::Nvfp4Group16:
         decode<DenseKvFormat::Nvfp4Group16, true, DenseKvFormat::Nvfp4Group16, true>(
             key_codes, key_scales, value_codes, value_scales, keys, values, stream);
@@ -99,6 +106,11 @@ void dense_kv_ring_decode_launch(const Tensor& key_codes, const Tensor& key_scal
         decode<DenseKvFormat::Fp8Row, true, DenseKvFormat::Nvfp4Group16, true>(
             key_codes, key_scales, value_codes, value_scales, keys, values, stream);
         return;
+#else
+    case KvCacheStorage::Nvfp4Group16:
+    case KvCacheStorage::Fp8KeyNvfp4Value:
+        throw std::runtime_error("dense_kv_ring_decode: NVFP4 KV storage requires an sm_120a GPU");
+#endif
     case KvCacheStorage::BFloat16:
         break;
     }

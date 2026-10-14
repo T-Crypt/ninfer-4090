@@ -48,7 +48,7 @@ struct Nvfp4BankReader {
             static_cast<std::size_t>(row) * (columns / 2) + static_cast<std::size_t>(column / 2);
         const float2 pair        = decode_nvfp4_e2m1x2(codes[code_offset]);
         const float code         = (column & 1) == 0 ? pair.x : pair.y;
-        const std::uint8_t scale = scales[nvfp4_scale_byte_runtime(row, column / 16, columns / 64)];
+        const std::uint8_t scale = scales[nvfp4_scale_byte_offset(row, column / 16, columns)];
         return code * decode_nvfp4_e4m3(scale) * __frcp_rn(divisors[row / divisor_rows]);
     }
 };

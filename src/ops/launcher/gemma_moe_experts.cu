@@ -216,6 +216,11 @@ void gemma_moe_experts_launch(const void* x, const void* expert_ids, const void*
     if (gate_up.qtype != down.qtype) {
         throw std::invalid_argument("gemma_moe_experts: the two banks must share one format");
     }
+#if !NINFER_ENABLE_NVFP4_FAMILY
+    if (gate_up.qtype == QType::NVFP4) {
+        throw std::runtime_error("gemma_moe_experts: NVFP4 MoE banks require an sm_120a GPU");
+    }
+#endif
 
     switch (route_for(gate_up.qtype, hidden, intermediate, top_k, tokens)) {
     case Route::Grouped:
@@ -223,11 +228,14 @@ void gemma_moe_experts_launch(const void* x, const void* expert_ids, const void*
                              workspace, out, stream);
         return;
     case Route::Streamed:
+#if NINFER_ENABLE_NVFP4_FAMILY
         if (gate_up.qtype == QType::NVFP4) {
             launch_stream_route<Nvfp4Codec, kHidden, kIntermediate, kTopK>(
                 x, expert_ids, expert_weights, gate_up, down, tokens,
                 static_cast<float*>(workspace), out, stream);
-        } else {
+        } else
+#endif
+        {
             launch_stream_route<Q4RowsCodec, kHidden, kIntermediate, kTopK>(
                 x, expert_ids, expert_weights, gate_up, down, tokens,
                 static_cast<float*>(workspace), out, stream);
@@ -257,6 +265,7 @@ void gemma_moe_experts_launch(const void* x, const void* expert_ids, const void*
                      intermediate, top_k, tokens, out, stream);
         return;
     }
+#if NINFER_ENABLE_NVFP4_FAMILY
     if (gate_up.qtype == QType::NVFP4) {
         const Nvfp4BankReader gate_up_reader{static_cast<const std::uint8_t*>(gate_up.payload),
                                              static_cast<const std::uint8_t*>(gate_up.scales),
@@ -269,6 +278,7 @@ void gemma_moe_experts_launch(const void* x, const void* expert_ids, const void*
                      intermediate, top_k, tokens, out, stream);
         return;
     }
+#endif
     throw std::invalid_argument("gemma_moe_experts: unsupported bank format");
 }
 
