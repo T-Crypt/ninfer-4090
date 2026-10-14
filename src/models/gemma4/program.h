@@ -181,7 +181,7 @@ public:
      * a Program can score many windows in a row.
      */
     [[nodiscard]] std::vector<float> causal_score(std::span<const std::int32_t> ids,
-                                                  std::int32_t first_target, const LogitsSink& sink,
+                                                  std::int32_t first_target,
                                                   DeviceExecutionView execution);
 
     // The most tokens one pass covers, which fixes the layer scratch. Prefill applies the head to

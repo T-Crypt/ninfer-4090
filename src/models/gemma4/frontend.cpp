@@ -1029,25 +1029,13 @@ std::optional<std::string> OutputSession::matched_stop_string() const {
 OutputSession Frontend::make_output_session(const PreparedPrompt& prompt,
                                             const StopPolicy& caller_stop,
                                             const OutputOptions& output,
-                                            const ThinkingControlOptions& thinking,
-                                            const std::optional<OutputConstraint>& constraint,
-                                            const ToolChoice& tool_choice) const {
-    if (constraint) {
-        throw RequestError(RequestErrorKind::InvalidGrammar,
-                           "this Gemma model does not support output constraints");
-    }
+                                            const ThinkingControlOptions& thinking) const {
     const bool has_tools = prompt.tool_names && !prompt.tool_names->empty();
-    if (has_tools && (tool_choice.mode == ToolChoiceMode::Required || tool_choice.allowed_names)) {
-        throw RequestError(RequestErrorKind::InvalidToolConstraint,
-                           "this Gemma model cannot force or restrict tool calls; only "
-                           "tool_choice auto or none is supported",
-                           {}, RequestErrorSource::Tools);
-    }
     auto impl              = std::make_unique<OutputSession::Impl>();
     impl->tokenizer        = impl_->tokenizer;
     impl->raw              = output.raw;
     impl->preserve_special = output.raw || output.preserve_special_tokens;
-    impl->parse_calls      = !output.raw && has_tools && tool_choice.mode != ToolChoiceMode::None;
+    impl->parse_calls      = !output.raw && has_tools;
     impl->tool_names       = prompt.tool_names;
     impl->channel_open     = impl_->channel_open;
     impl->channel_close    = impl_->channel_close;

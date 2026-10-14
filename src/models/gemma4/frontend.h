@@ -115,14 +115,8 @@ public:
                                                           std::uint32_t total_budget_remaining);
     void validate_generation_capacity(std::uint32_t effective_output_tokens) const;
 
-    // No output constraint reaches this session: the Program consumes no token masks, so the Engine
-    // refuses a constrained request before it gets here.
-    [[nodiscard]] bool constrained() const noexcept { return false; }
     void observe_constraint(bool, double) noexcept {}
     void constraint_uploaded(std::size_t) noexcept {}
-    [[nodiscard]] std::optional<ConstraintObservation> constraint_observation() const {
-        return {};
-    }
     [[nodiscard]] std::uint32_t grammar_masks(std::span<const TokenId>, std::span<std::uint32_t>);
 
     [[nodiscard]] std::vector<GeneratedToolCall> take_tool_calls() noexcept;
@@ -161,12 +155,13 @@ public:
     [[nodiscard]] MediaCacheSummary media_cache_summary() const { return {}; }
     [[nodiscard]] ModelSamplingDefaults sampling_defaults() const;
 
+    // The Gemma model has no grammar or tool-choice machinery: declared tools are parsed when
+    // they appear, and nothing more. The Engine's v3 request path carries no constraint or
+    // tool-choice options, so neither reaches this session.
     [[nodiscard]] OutputSession
     make_output_session(const PreparedPrompt& prompt, const StopPolicy& caller_stop,
-                        const OutputOptions& output                       = {},
-                        const ThinkingControlOptions& thinking            = {},
-                        const std::optional<OutputConstraint>& constraint = {},
-                        const ToolChoice& tool_choice                     = {}) const;
+                        const OutputOptions& output            = {},
+                        const ThinkingControlOptions& thinking = {}) const;
 
     // The rendered prompt text, without tokenizing it: what the template produced for `input`.
     [[nodiscard]] std::string render(const PromptInput& input,
