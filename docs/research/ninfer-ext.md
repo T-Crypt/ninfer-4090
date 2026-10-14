@@ -75,3 +75,31 @@ non-plan session); the review steps below are ready to run.
 
 `docs/prep4qwen.md` + all 13 `docs/research/*` files checked out from
 `prep4qwen` onto this branch, unmodified. This file is the only new doc.
+
+## Carried and merged (2026-10-13, branch `gemma4-26b`)
+
+The Gemma 4 family is carried and merged into `ninfer-4090-ext` (fast-forward to `efdc6d5a`). It
+builds on sm_89 and it runs: the 26B-A4B IT QAT artifact loads in 34 s at 131072 context, takes
+17,454 MiB, answers coherently across turns, and returns a real tool call. Live through llama-swap on
+aphotic as `Gemma4-26B-A4B-QAT` (alias `gemma4-26b`).
+
+What came over: `src/models/gemma4/**`, the Gemma engine instance, the `q4_g32_fp16_rows` GEMM family
+(`src/ops/linear/q4rows/`) with the `row_group_v1` layout, Gemma q5/q6 shapes, the Gemma MoE
+router/experts wrappers, twelve new op headers, proportional RoPE, weightless and sigmoid-gated
+RMSNorm, and the 5-argument embedding. NVFP4 routes sit behind `NINFER_ENABLE_NVFP4_FAMILY` (0 on
+Ada) with a runtime throw, so no FP4 symbols exist in this build.
+
+Most of the work was not the copy. The base already had the v3 merge applied (`42837d7c`) and mixed
+pre-v3 fork code with v3 headers, so the bulk was repairing that fallout. Three things to know:
+
+- The unanchored `models/` line in `.gitignore` silently ignored every new file under `src/models/`.
+  It is gone; `/models/` on line 35 already covers the root weights directory.
+- Session slot persistence is **stubbed**: `save_slot`/`restore_slot`/`erase_slot` throw, because the
+  fork's snapshot code needs the deleted `src/targets/` runtime. Production passes no
+  `--slot-save-path`, so nothing live touches it.
+- Gemma needs `--kv-dtype bf16` and must NOT be given `--lm-head-draft` (it runs MTP on the full
+  proposal head only). No prefix reuse, `top_k` capped at 20.
+
+Not yet through: perplexity, long-context recall, vision, and an MTP acceptance number. The homelab
+record is `reference/records/ninfer-gemma4.md`; the ticket is `08EA0Q9` (done) with the gates in
+`EJYZAVT`.
