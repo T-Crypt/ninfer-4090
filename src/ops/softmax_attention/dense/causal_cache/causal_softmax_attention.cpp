@@ -522,7 +522,7 @@ void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
             detail::causal_attention_resolve_route(q.ne[1], width, batch, cache.storage, envelope);
         if (route == detail::CausalAttentionRoute::ChunkedSmallT) {
             launch_chunked_small_t(q, k, v, positions, valid_columns, kv_table_rows, scale, cache,
-                                   envelope, workspace, out, stream);
+                                   envelope, workspace, out, execution.stream);
             return;
         }
         if (route == detail::CausalAttentionRoute::SmallT) {
@@ -532,11 +532,11 @@ void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
                 allocate_small_t_workspace(workspace, q.ne[1], width, splits, batch);
             detail::causal_attention_small_t_launch(q, k, v, positions, valid_columns, kv_table_rows,
                                                     scale, cache, envelope, 0, width, partial.acc,
-                                                    partial.m, partial.l, out, stream);
+                                                    partial.m, partial.l, out, execution.stream);
             return;
         }
         detail::causal_attention_prompt_launch(q, k, v, positions, valid_columns, kv_table_rows, scale,
-                                               cache, out, stream);
+                                               cache, out, execution.stream);
             return;
     }
 
@@ -585,7 +585,7 @@ void causal_softmax_attention_cached(const Tensor& q, const Tensor& positions,
         const detail::CausalAttentionRoute route =
             detail::causal_attention_resolve_route(q.ne[1], q.ne[2], 1, cache.storage, envelope);
         if (route == detail::CausalAttentionRoute::ChunkedSmallT) {
-            launch_cached_chunked_small_t(q, positions, scale, cache, envelope, workspace, out, stream);
+            launch_cached_chunked_small_t(q, positions, scale, cache, envelope, workspace, out, execution.stream);
             return;
         }
         if (route == detail::CausalAttentionRoute::SmallT) {
@@ -594,10 +594,10 @@ void causal_softmax_attention_cached(const Tensor& q, const Tensor& positions,
             SmallTWorkspace partial =
                 allocate_small_t_workspace(workspace, q.ne[1], q.ne[2], splits, 1);
             detail::causal_attention_cached_small_t_launch(
-                q, positions, scale, cache, envelope, partial.acc, partial.m, partial.l, out, stream);
+                q, positions, scale, cache, envelope, partial.acc, partial.m, partial.l, out, execution.stream);
             return;
         }
-        detail::causal_attention_prompt_attention_launch(q, positions, scale, cache, out, stream);
+        detail::causal_attention_prompt_attention_launch(q, positions, scale, cache, out, execution.stream);
             return;
     }
 

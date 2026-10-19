@@ -479,7 +479,7 @@ prepare_context_cache(ContextCacheHints hints, std::size_t message_count,
         }
     }
 
-    out.opportunities.reserve(7U + hints.automatic_private_anchors);
+    out.opportunities.reserve(7U);
     const auto add_opportunity = [&](PromptCacheMarkerKind kind, SharedCandidateEvidence evidence,
                                      std::uint32_t frontier, std::uint32_t input_order) {
         if (frontier == 0 || !exact_vision_frontier(frontier, vision_items)) { return; }
@@ -505,24 +505,6 @@ prepare_context_cache(ContextCacheHints hints, std::size_t message_count,
     }
 
     std::uint32_t engine_order = static_cast<std::uint32_t>(hints.markers.size());
-    // Engine-automatic private long anchors: the boundaries after the last N messages, newest
-    // first, skipping the boundary after the final message (the endpoint and rewrite checkpoints
-    // already cover the tail) and the preamble boundary at index 0. A prompt that later rewrites
-    // one of those messages restores at the anchor below the edit instead of re-prefilling from
-    // token zero. Unresolved boundaries (a folded instruction message) still consume one of the
-    // N positions, so the count is "the last N boundaries", not "N anchors".
-    if (hints.automatic_private_anchors != 0 && message_count > 1) {
-        std::uint32_t remaining = hints.automatic_private_anchors;
-        for (std::size_t after = message_count - 1U; after != 0 && remaining != 0;
-             --after, --remaining) {
-            if (after >= message_boundaries.size() || !message_boundaries[after] ||
-                *message_boundaries[after] >= full_prompt_frontier) {
-                continue;
-            }
-            add_opportunity(PromptCacheMarkerKind::PrivateLongAnchor, SharedCandidateEvidence::None,
-                            *message_boundaries[after], engine_order++);
-        }
-    }
     if (hints.allow_engine_automatic_shared_prefixes) {
         if (engine_tool_marker_index && *engine_tool_marker_index < cache_boundaries.size() &&
             cache_boundaries[*engine_tool_marker_index]) {
