@@ -729,7 +729,7 @@ int main(int argc, char** argv) {
               },
               {{"format", "bf16"}, {"suite", "kv"}});
 
-#if NINFER_TARGET_RTX5090
+#if 0 // Fork (prep/qwen4-27b-ops): four-head FP8 targets the retired Row256 layout
     // Four-head FP8 cache: independent math and current-metadata replay, without
     // taking a Cartesian product of existing layout/alias/storage cases.
     for (bool kv_only : {false, true}) {

@@ -15,7 +15,8 @@ inline int registered_query_heads(int kv, KvCacheStorage storage) {
     if (kv == 1) return HeadGeometry<1>::query_heads;
     if (kv == 2) return HeadGeometry<2>::query_heads;
 #if NINFER_TARGET_RTX5090
-    if (kv == 4 && storage == KvCacheStorage::Fp8E4M3Row256) return HeadGeometry<4>::query_heads;
+    // Fork (prep/qwen4-27b-ops): upstream wrote the four-head FP8 path for the retired
+    // Fp8E4M3Row256 layout; master's G128 UE8M0 cache is not wired into it, so it stays off.
 #endif
     return 0;
 }

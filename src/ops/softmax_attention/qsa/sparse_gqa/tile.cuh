@@ -19,11 +19,20 @@ struct SparseGqaRaw<Storage, N, true> {
 };
 
 template <KvCacheStorage Storage, int N, int Warps, SparseGqaLoad Load = SparseGqaLoad::Direct,
-          SparseGqaWarpSplit Split = SparseGqaWarpSplit::Sequence>
+          SparseGqaWarpSplit Split = SparseGqaWarpSplit::Sequence, int PaddedHeads = 16>
 struct SparseGqaStorage : SparseGqaRaw<Storage, N, Load == SparseGqaLoad::Staged> {
     union {
-        std::uint16_t kv[2 * N * 256];
-        float partial[(Split == SparseGqaWarpSplit::Sequence ? Warps : 1) * 16 * 256];
+        // Aliased decode needs one FP16 tile and one native packed tile.
+        alignas(16) std::uint16_t
+            kv[Load == SparseGqaLoad::Aliased
+                   ? N * 256 + N *
+                                   (std::max(SparseGqaCodec<Storage, true>::code_bytes,
+                                             SparseGqaCodec<Storage, false>::code_bytes) +
+                                    std::max(SparseGqaCodec<Storage, true>::scale_bytes,
+                                             SparseGqaCodec<Storage, false>::scale_bytes)) /
+                                   2
+                   : 2 * N * 256];
+        float partial[(Split == SparseGqaWarpSplit::Sequence ? Warps : 1) * PaddedHeads * 256];
     };
 
     // Address staging ends before warp reduction. The four address planes fit the same
@@ -34,7 +43,7 @@ struct SparseGqaStorage : SparseGqaRaw<Storage, N, Load == SparseGqaLoad::Staged
         } addresses;
 
         struct {
-            float maximum[Warps * 16], sum[Warps * 16];
+            float maximum[Warps * PaddedHeads], sum[Warps * PaddedHeads];
         } statistics;
     };
 };
@@ -43,9 +52,10 @@ struct SparseGqaStorage : SparseGqaRaw<Storage, N, Load == SparseGqaLoad::Staged
 // G128 exponents for those rows, retaining them across the preceding QK/PV work.
 // Pack the primary FP16 multiplier and original exponent into one register.
 template <KvCacheStorage Storage, bool Key, int N, int Warps, SparseGqaLoad Load,
-          SparseGqaWarpSplit Split>
+          SparseGqaWarpSplit Split, int PaddedHeads>
 __device__ __forceinline__ bool
-sparse_gqa_wait_stage(SparseGqaStorage<Storage, N, Warps, Load, Split>&, unsigned& scale) {
+sparse_gqa_wait_stage(SparseGqaStorage<Storage, N, Warps, Load, Split, PaddedHeads>&,
+                      unsigned& scale) {
     using Codec = SparseGqaCodec<Storage, Key>;
     if constexpr (Load != SparseGqaLoad::Direct &&
                   Codec::format == KvCacheVectorFormat::Fp8E4m3fnGroup128Ue8m0) {
@@ -62,11 +72,12 @@ sparse_gqa_wait_stage(SparseGqaStorage<Storage, N, Warps, Load, Split>&, unsigne
     }
 }
 
-template <KvCacheStorage Storage, int N, int Warps, SparseGqaLoad Load, SparseGqaWarpSplit Split>
-__device__ void sparse_gqa_addresses(const SparseGqaArguments& a,
-                                     SparseGqaStorage<Storage, N, Warps, Load, Split>& s,
-                                     SparseGqaWork work, std::int64_t q, int head, int start,
-                                     int end) {
+template <KvCacheStorage Storage, int N, int Warps, SparseGqaLoad Load, SparseGqaWarpSplit Split,
+          int PaddedHeads>
+__device__ void
+sparse_gqa_addresses(const SparseGqaArguments& a,
+                     SparseGqaStorage<Storage, N, Warps, Load, Split, PaddedHeads>& s,
+                     SparseGqaWork work, std::int64_t q, int head, int start, int end) {
     const int i = threadIdx.x;
     if (i < N / 4 && start + i * 4 < end) {
         const int ordinal = start / 4 + i;
@@ -88,15 +99,17 @@ __device__ void sparse_gqa_addresses(const SparseGqaArguments& a,
 }
 
 template <KvCacheStorage Storage, int N, int Warps, bool Vector, bool Key,
-          bool PrefetchFp8Scale = true, SparseGqaLoad Load, SparseGqaWarpSplit Split>
+          bool PrefetchFp8Scale = true, SparseGqaLoad Load, SparseGqaWarpSplit Split,
+          int PaddedHeads>
 __device__ __forceinline__ unsigned
-sparse_gqa_stage(const SparseGqaArguments& a, SparseGqaStorage<Storage, N, Warps, Load, Split>& s,
-                 int start, int end) {
+sparse_gqa_stage(const SparseGqaArguments& a,
+                 SparseGqaStorage<Storage, N, Warps, Load, Split, PaddedHeads>& s, int start,
+                 int end) {
     using Codec      = SparseGqaCodec<Storage, Key>;
     const auto plane = Key ? a.key : a.value, scale_plane = Key ? a.key_scale : a.value_scale;
     const auto* addresses       = Key ? s.addresses.key : s.addresses.value;
     const auto* scale_addresses = Key ? s.addresses.key_scale : s.addresses.value_scale;
-    auto* decoded               = s.kv + (Key ? 0 : N * 256);
+    auto* decoded               = s.kv + (Key || Load == SparseGqaLoad::Aliased ? 0 : N * 256);
     unsigned scale              = 127;
     if constexpr (Load != SparseGqaLoad::Direct) {
         static_assert(kSparseQuantized<Storage> && Vector);
@@ -113,6 +126,11 @@ sparse_gqa_stage(const SparseGqaArguments& a, SparseGqaStorage<Storage, N, Warps
         if constexpr (Load == SparseGqaLoad::InPlace) {
             codes  = reinterpret_cast<std::uint8_t*>(decoded) + N * (512 - Row);
             scales = codes + Codec::code_bytes;
+        } else if constexpr (Load == SparseGqaLoad::Aliased) {
+            // QK and PV consume decoded tiles consecutively. The other half holds a
+            // compact async slot, disjoint from the current decoded operand.
+            codes  = reinterpret_cast<std::uint8_t*>(s.kv + N * 256);
+            scales = codes + N * Codec::code_bytes;
         } else {
             codes  = s.codes;
             scales = s.scales;
@@ -216,17 +234,25 @@ sparse_gqa_expand_in_place(std::uint16_t* dst, const std::uint8_t* raw, unsigned
 }
 
 template <KvCacheStorage Storage, bool Key, int N, int Warps, SparseGqaLoad Load,
-          SparseGqaWarpSplit Split>
+          SparseGqaWarpSplit Split, int PaddedHeads>
 __device__ __forceinline__ void
-sparse_gqa_expand_stage(SparseGqaStorage<Storage, N, Warps, Load, Split>& s, bool half_scale,
-                        unsigned fp8_scale) {
+sparse_gqa_expand_stage(SparseGqaStorage<Storage, N, Warps, Load, Split, PaddedHeads>& s,
+                        bool half_scale = true, unsigned fp8_scale = 0) {
     using Codec = SparseGqaCodec<Storage, Key>;
-    auto* dst   = s.kv + (Key ? 0 : N * 256);
+    auto* dst   = s.kv + (Key || Load == SparseGqaLoad::Aliased ? 0 : N * 256);
     if constexpr (Load == SparseGqaLoad::InPlace) {
         constexpr int Row = Codec::packed_row;
         const auto* raw   = reinterpret_cast<const std::uint8_t*>(dst) + N * (512 - Row);
         sparse_gqa_expand_in_place<Storage, Key, N, Warps>(dst, raw, fp8_scale);
-    } else if constexpr (Load == SparseGqaLoad::Staged) {
+    } else if constexpr (Load == SparseGqaLoad::Staged || Load == SparseGqaLoad::Aliased) {
+        const std::uint8_t *codes, *scales;
+        if constexpr (Load == SparseGqaLoad::Aliased) {
+            codes  = reinterpret_cast<const std::uint8_t*>(s.kv + N * 256);
+            scales = codes + N * Codec::code_bytes;
+        } else {
+            codes  = s.codes;
+            scales = s.scales;
+        }
         for (int i = threadIdx.x; i < N * 32; i += Warps * 32) {
             const int row = i / 32, d = i % 32 * 8;
             unsigned scale = 0;
@@ -235,8 +261,8 @@ sparse_gqa_expand_stage(SparseGqaStorage<Storage, N, Warps, Load, Split>& s, boo
                     __shfl_sync(0xffffffffu, fp8_scale, row / Warps * 2 + threadIdx.x % 32 / 16);
             common::store_vec(dst + row * 256 + common::swizzle_xor_64(row, d),
                               sparse_gqa_expand_prepared<Storage, Key>(
-                                  s.codes + row * Codec::code_bytes,
-                                  s.scales + row * Codec::scale_bytes, d, scale));
+                                  codes + row * Codec::code_bytes,
+                                  scales + row * Codec::scale_bytes, d, scale));
         }
         __syncthreads();
     }

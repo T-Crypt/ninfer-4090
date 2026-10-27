@@ -86,7 +86,7 @@ __global__ __launch_bounds__(128) void prepare_kernel(const __grid_constant__ Pr
         }
     }
     if (live && task < Geometry::raw_task) {
-        if constexpr (Storage == KvCacheStorage::Fp8E4M3Row256 && KvHeads == 4) {
+        if constexpr (false && KvHeads == 4) { // four-head FP8 (retired Row256 layout) stays off
             prepare_fp8_kv_vector<KvHeads>(a, task - Geometry::key_task, t, b, lane, coefficients);
         } else if constexpr (Storage == KvCacheStorage::Nvfp4Group16 ||
                              Storage == KvCacheStorage::Fp8KeyNvfp4Value) {
