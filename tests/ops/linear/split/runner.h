@@ -52,6 +52,7 @@ struct Invocation {
     bool validate_operands     = false;
     bool workspace_intervals   = false;
     bool reindex_invariance    = false;
+    int token_axis             = 0; // Check zero-copy [D,H,T,B] with this T and B=t/T.
     std::string id;
 };
 
