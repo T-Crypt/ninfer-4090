@@ -145,7 +145,7 @@ void dispatch(const PrepareArguments& args, PreparePlan plan, cudaStream_t strea
 #if NINFER_TARGET_RTX5090
     else if (args.kv_heads == 4) {
         if constexpr (false /* four-head FP8: retired Row256 */ ||
-                      Storage == KvCacheStorage::BFloat16)
+                      Storage == KvCacheStorage::BFloat16 || Storage == KvCacheStorage::Int8Group64)
             dispatch_geometry<Storage, 4, Queries>(args, plan, stream);
     }
 #endif
