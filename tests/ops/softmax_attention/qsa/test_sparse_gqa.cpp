@@ -579,7 +579,8 @@ void add_local_cases(OpSuite& suite, KvCacheStorage storage) {
 }
 
 void add_four_head_cases(OpSuite& suite) {
-    constexpr auto storage = KvCacheStorage::Fp8E4M3Row256;
+    // Fork (prep/qwen4-27b-ops): the four-head path runs INT8 G64 on sm_89 (FP8 Row256 is retired).
+    constexpr auto storage = KvCacheStorage::Int8Group64;
     const auto add         = [&](int t, int b, int history, bool padded = false, int cap = 512,
                          float magnitude = 1.F, bool graph = false) {
         add_case(suite, t, b, history, padded, cap, magnitude, graph, storage,
