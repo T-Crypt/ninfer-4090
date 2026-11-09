@@ -51,6 +51,7 @@ inline CacheEncoding cache_encoding(KvCacheStorage storage) {
         return {nvfp4, nvfp4};
     case KvCacheStorage::Fp8KeyNvfp4Value:
         return {fp8, nvfp4};
+    case KvCacheStorage::RotatedInt4KeyInt4ValueGroup64:
     case KvCacheStorage::RK4V4E8: {
         // Fork: the stored form is signed INT4 x FP16 G64 for both planes. Nearest rounding is a
         // valid E8-plane payload; the E8 encoder is checked separately.
@@ -229,7 +230,7 @@ inline bool compatible_key_encoding(std::array<double, 256> ideal, VectorEncodin
             scale > std::max(low.value, high.value))
             return false;
         for (int d = begin; d < begin + format.group; ++d) {
-            const auto code  = format.encoding == Encoding::Nvfp4
+            const auto code  = format.encoding == Encoding::Nvfp4 || format.encoding == Encoding::Int4
                                    ? (actual.data[d / 2] >> (4 * (d % 2))) & 15
                                    : actual.data[d];
             const double q   = decode_code(code, format.encoding);

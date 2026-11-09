@@ -180,8 +180,9 @@ __device__ __forceinline__ void store_quantized_contiguous(const float (&values)
                                                            std::uint8_t* scales, int lane) {
     if constexpr (Storage == KvCacheStorage::Int8Group64)
         store_int8_contiguous(values, codes, scales, lane);
-    else if constexpr (Storage == KvCacheStorage::RK4V4E8)
-        store_int4_contiguous<Key>(values, codes, scales, lane);
+    else if constexpr (Storage == KvCacheStorage::RK4V4E8 || Storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64)
+        // rk4v4-e8 projects keys onto E8; rk4v4 rounds both planes to the nearest INT4.
+        store_int4_contiguous<Key && Storage == KvCacheStorage::RK4V4E8>(values, codes, scales, lane);
     else {
         static_assert(Storage != Storage, "four-head FP8 targets the retired Row256 layout");
     }

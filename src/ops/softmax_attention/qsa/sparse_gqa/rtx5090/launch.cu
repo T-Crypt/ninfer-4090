@@ -100,14 +100,14 @@ void launch_sparse_gqa_instance(SparseGqaArguments a, KvCacheStorage storage, in
                 launch<Storage, false, KvHeads>(a, plan, launch_plan, queries, execution);
         };
         if (kv_heads == 1) {
-            if constexpr (Storage != KvCacheStorage::RK4V4E8) geometry.template operator()<1>();
+            if constexpr ((Storage != KvCacheStorage::RK4V4E8 && Storage != KvCacheStorage::RotatedInt4KeyInt4ValueGroup64)) geometry.template operator()<1>();
         } else if (kv_heads == 4) {
             if constexpr (false /* four-head FP8: retired Row256 */ ||
                           Storage == KvCacheStorage::BFloat16 ||
                           Storage == KvCacheStorage::Int8Group64 ||
-                          Storage == KvCacheStorage::RK4V4E8)
+                          (Storage == KvCacheStorage::RK4V4E8 || Storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64))
                 geometry.template operator()<4>();
-        } else if constexpr (Storage != KvCacheStorage::RK4V4E8)
+        } else if constexpr ((Storage != KvCacheStorage::RK4V4E8 && Storage != KvCacheStorage::RotatedInt4KeyInt4ValueGroup64))
             geometry.template operator()<2>();
     };
     switch (storage) {
@@ -128,6 +128,9 @@ void launch_sparse_gqa_instance(SparseGqaArguments a, KvCacheStorage storage, in
         break;
     case KvCacheStorage::RK4V4E8:
         dispatch.template operator()<KvCacheStorage::RK4V4E8>();
+        break;
+    case KvCacheStorage::RotatedInt4KeyInt4ValueGroup64:
+        dispatch.template operator()<KvCacheStorage::RotatedInt4KeyInt4ValueGroup64>();
         break;
     default:
         break; // Validated by the public wrapper.

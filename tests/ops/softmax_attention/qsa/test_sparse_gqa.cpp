@@ -715,6 +715,7 @@ int main(int argc, char** argv) {
     }
 #if NINFER_TARGET_RTX5090
     add_four_head_cases(suite, KvCacheStorage::RK4V4E8);
+    add_four_head_cases(suite, KvCacheStorage::RotatedInt4KeyInt4ValueGroup64);
     add_four_head_storage_cases(suite, KvCacheStorage::BFloat16);
     add_four_head_storage_cases(suite, KvCacheStorage::Int8Group64);
 #endif

@@ -69,6 +69,39 @@ struct Error {
     }
 };
 
+// Fork (prep/qwen4-27b-ops): rk4v4-e8 keys are E8-projected before rounding, so they are not
+// nearest-INT4 codes. Check what the codec guarantees: the FP16 absmax/7 scale of the rotated key,
+// codes in [-8,7], and each coordinate within 1.5 steps of the ideal (E8 covering radius 1 plus the
+// collapsed half coset). Accumulate the reconstruction error against nearest INT4 for the report.
+struct E8KeyStats {
+    double e8 = 0, nearest = 0;
+};
+
+int e8_key_check(std::array<double, 256> ideal, const EncodedRow& got, E8KeyStats& stats) {
+    hadamard(ideal);
+    double magnitude = 0;
+    for (double x : ideal) magnitude = std::max(magnitude, std::abs(x));
+    const double delta = 2e-5 * magnitude + 64 * double(std::numeric_limits<float>::denorm_min());
+    int failures       = 0;
+    for (int g = 0; g < 4; ++g) {
+        double absmax = 0;
+        for (int d = 64 * g; d < 64 * g + 64; ++d) absmax = std::max(absmax, std::abs(ideal[d]));
+        const float low   = fp16_decode(fp16_encode(float(std::max(0.0, absmax - delta) / 7.0)));
+        const float high  = fp16_decode(fp16_encode(float((absmax + delta) / 7.0)));
+        const float scale = fp16_decode(read_u16(got.scales, 2 * g));
+        if (!(scale >= low && scale <= high)) ++failures;
+        for (int d = 64 * g; d < 64 * g + 64; ++d) {
+            const int q    = int((got.data[d / 2] >> (4 * (d % 2))) & 15 ^ 8) - 8;
+            const double x = scale > 0 ? ideal[d] / scale : 0;
+            if (q < -8 || q > 7 || std::abs(q - x) > 1.5 + 1e-3) ++failures;
+            const double n = std::clamp(std::nearbyint(x), -7.0, 7.0);
+            stats.e8 += (q * double(scale) - ideal[d]) * (q * double(scale) - ideal[d]);
+            stats.nearest += (n * double(scale) - ideal[d]) * (n * double(scale) - ideal[d]);
+        }
+    }
+    return failures;
+}
+
 int verify(Fixture& f, const std::string& label) {
     const auto actual_q  = f.kv_only
                                ? std::vector<std::uint16_t>{}
@@ -84,6 +117,7 @@ int verify(Fixture& f, const std::string& label) {
     auto expected_raw  = f.records.host;
     auto expected_rope = f.record_rope.host;
     Error q_error, k_error, iq_error, ik_error;
+    E8KeyStats e8_stats;
     int failures           = 0;
     const auto coordinates = [&](int t, int b) {
         return std::array{f.rope.at(t, 0, b), f.rope.at(t, f.A == 1 ? 0 : 1, b),
@@ -144,7 +178,14 @@ int verify(Fixture& f, const std::string& label) {
                     std::array<double, 256> key;
                     std::copy(ideal.values.begin(), ideal.values.end(), key.begin());
                     EncodedRow got{row(actual_k, f.keys), row(actual_ks, f.key_scales)};
-                    if (!compatible_key_encoding(key, f.encoding.key, got)) {
+                    if (f.storage == KvCacheStorage::RK4V4E8) {
+                        const int bad = e8_key_check(key, got, e8_stats);
+                        if (bad) {
+                            std::cerr << label << " E8 K codes outside the lattice bound at " << b
+                                      << '/' << t << '/' << h << " (" << bad << ")\n";
+                            failures += bad;
+                        }
+                    } else if (!compatible_key_encoding(key, f.encoding.key, got)) {
                         std::cerr << label << " K encoding incompatible with mathematical key at "
                                   << b << '/' << t << '/' << h << '\n';
                         ++failures;
@@ -205,6 +246,9 @@ int verify(Fixture& f, const std::string& label) {
             pending.clear();
         }
     }
+    if (f.storage == KvCacheStorage::RK4V4E8 && e8_stats.nearest > 0)
+        std::cout << label << " rk4v4-e8 K mse/nearest-int4 mse = " << e8_stats.e8 / e8_stats.nearest
+                  << '\n';
     failures += q_error.check(label + " Q") + k_error.check(label + " K") +
                 iq_error.check(label + " IQ") + ik_error.check(label + " IK");
     failures += verify_exact("K untouched", actual_k, expected_k);
@@ -824,9 +868,13 @@ int main(int argc, char** argv) {
                   return failed;
               },
               {{"format", "fp8"}});
+#endif // four-head FP8 (retired Row256)
+#if NINFER_TARGET_RTX5090
     // Each additional codec covers both semantic entries and distinct cache/record layouts,
     // with one compact set of mathematical risks rather than a storage/layout cross product.
-    for (auto storage : {KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64}) {
+    for (auto storage :
+         {KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64,
+          KvCacheStorage::RotatedInt4KeyInt4ValueGroup64, KvCacheStorage::RK4V4E8}) {
         const std::string format = kv_cache_storage_name(storage);
         for (bool kv_only : {false, true}) {
             const std::string prefix =
@@ -852,7 +900,8 @@ int main(int argc, char** argv) {
         suite.add("qsa_prepare/" + format + "/h24_4/norm_alignment",
                   [=] { return norm_alignment_and_phase(cuda_environment().context, storage, 4); },
                   {{"format", format}});
-        if (storage != KvCacheStorage::BFloat16)
+        // rk4v4-e8 keys are not nearest codes; verify() applies the E8 lattice bound instead.
+        if (storage != KvCacheStorage::BFloat16 && storage != KvCacheStorage::RK4V4E8)
             suite.add("qsa_prepare/" + format + "/h24_4/encoding_boundaries",
                       [=] {
                           auto& device = cuda_environment().context;
