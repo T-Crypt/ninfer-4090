@@ -94,6 +94,16 @@ void q5_a16_conformance(Suite& suite) {
               make_q5_g64_fp16_weight,
               {5120, 17408, 175U, Comparison::Sampled, false, kN5120K17408});
 
+    // Fork (prep/qwen4-27b-ops): Qwen4-27B FFN down [5120,14336].
+    const std::array kN5120K14336Full{graph(1),  graph(4),  graph(7),  graph(13),  graph(20),
+                                      graph(28), graph(40), graph(80), graph(144), graph(193)};
+    add_shape(suite, ninfer::QType::Q5_G64_FP16, ActivationRecipe::TokenBlocks,
+              make_q5_g64_fp16_weight,
+              {5120, 14336, 177U, Comparison::Full, true, kN5120K14336Full});
+    add_shape(suite, ninfer::QType::Q5_G64_FP16, ActivationRecipe::TokenBlocks,
+              make_q5_g64_fp16_weight,
+              {5120, 14336, 177U, Comparison::Sampled, false, kN5120K17408});
+
     const std::array kN1152K1152Full{graph(4),   graph(12),  graph(40),  graph(100),
                                      graph(160), graph(640), graph(1156)};
     add_shape(suite, ninfer::QType::Q5_G64_FP16, ActivationRecipe::TokenBlocks,
