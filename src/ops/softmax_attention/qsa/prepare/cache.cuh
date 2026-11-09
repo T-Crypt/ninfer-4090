@@ -106,32 +106,7 @@ __device__ __forceinline__ void prepare_kv(const PrepareArguments& a, int head, 
     }
 }
 
-__device__ __forceinline__ void store_fp8_contiguous(const float (&values)[8], std::uint8_t* codes,
-                                                     std::uint8_t* scales, int lane) {
-    float maximum = 0;
-#pragma unroll
-    for (float x : values) maximum = fmaxf(maximum, fabsf(x));
-    const auto quant = common::fp8_fp16_scale(common::warp_max(maximum));
-    unsigned words[2]{};
-#pragma unroll
-    for (int pair = 0; pair < 4; ++pair) {
-        const auto bits =
-            quant.inverse_scale > 0
-                ? __nv_cvt_float2_to_fp8x2(make_float2(values[2 * pair] * quant.inverse_scale,
-                                                       values[2 * pair + 1] * quant.inverse_scale),
-                                           __NV_SATFINITE, __NV_E4M3)
-                : 0;
-        words[pair / 2] |= unsigned(bits) << (16 * (pair % 2));
-    }
-    auto* output = codes + 8 * lane;
-    if (reinterpret_cast<std::uintptr_t>(output) % 8 == 0)
-        *reinterpret_cast<uint2*>(output) = make_uint2(words[0], words[1]);
-    else {
-#pragma unroll
-        for (int j = 0; j < 8; ++j) output[j] = std::uint8_t(words[j / 4] >> (8 * (j % 4)));
-    }
-    if (lane == 0) *reinterpret_cast<__half*>(scales) = quant.scale;
-}
+// Fork (prep/qwen4-27b-ops): the four-head FP8 Row256 encoder was removed with that layout.
 
 __device__ __forceinline__ void store_int8_contiguous(const float (&values)[8], std::uint8_t* codes,
                                                       std::uint8_t* scales, int lane) {
@@ -164,7 +139,6 @@ __device__ __forceinline__ void store_quantized_contiguous(const float (&values)
         store_int8_contiguous(values, codes, scales, lane);
     else {
         static_assert(Storage != Storage, "four-head FP8 targets the retired Row256 layout");
-        store_fp8_contiguous(values, codes, scales, lane);
     }
 }
 
