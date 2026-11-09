@@ -597,9 +597,11 @@ void add_four_head_cases(OpSuite& suite, KvCacheStorage storage) {
     add(33, 8, 1024, false, 512, 1.F, true);
     add(6, 8, 32771, true, 512, 1.8F, true);
     add(3, 2, 2052, true, 0, 0.1F, true);
-    const std::string prefix = "sparse_gqa_h24_4/fp8/";
-    const auto special       = [&](std::string id, auto run, const char* execution = "eager") {
-        suite.add(prefix + id, std::move(run), {{"format", "fp8"}, {"execution", execution}});
+    const std::string prefix =
+        std::string("sparse_gqa_h24_4/") + kv_cache_storage_name(storage) + "/";
+    const auto special = [&](std::string id, auto run, const char* execution = "eager") {
+        suite.add(prefix + id, std::move(run),
+                  {{"format", kv_cache_storage_name(storage)}, {"execution", execution}});
     };
     special("capacity", [=] {
         const int sms = cuda_environment().context.multiprocessor_count();
@@ -710,7 +712,6 @@ int main(int argc, char** argv) {
         add_local_cases(suite, storage);
     }
 #if NINFER_TARGET_RTX5090
-    add_four_head_cases(suite, KvCacheStorage::Int8Group64);
     add_four_head_cases(suite, KvCacheStorage::RK4V4E8);
     add_four_head_storage_cases(suite, KvCacheStorage::BFloat16);
     add_four_head_storage_cases(suite, KvCacheStorage::Int8Group64);
