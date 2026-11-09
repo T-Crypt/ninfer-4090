@@ -145,8 +145,7 @@ void dispatch(const PrepareArguments& args, PreparePlan plan, cudaStream_t strea
         if (args.kv_heads != 4)
             throw std::invalid_argument("qsa_prepare: rk4v4-e8 requires four KV heads");
         dispatch_geometry<Storage, 4, Queries>(args, plan, stream);
-        return;
-    }
+    } else {
     if (args.kv_heads == 1) dispatch_geometry<Storage, 1, Queries>(args, plan, stream);
 
 #if NINFER_TARGET_RTX5090
@@ -158,6 +157,7 @@ void dispatch(const PrepareArguments& args, PreparePlan plan, cudaStream_t strea
 #endif
     else
         dispatch_geometry<Storage, 2, Queries>(args, plan, stream);
+    }
 }
 
 template <bool Queries>
