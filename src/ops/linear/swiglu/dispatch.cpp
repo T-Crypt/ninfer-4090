@@ -22,6 +22,8 @@ void validate_swiglu_geometry(QType type, int rows, int k, bool clamped) {
     if ((type == QType::BF16 || type == QType::Q8_G32_FP16) && rows == 2048 && k == 4096) return;
 #endif
     if (type == QType::Q8_G32_FP16 && rows == 12288 && k == 2048) return;
+    // Fork (prep/qwen4-27b-ops): Qwen4-27B gate/up on the Q4 sm_89 recipe.
+    if (type == QType::Q4_G64_FP16 && rows == 28672 && k == 5120) return;
     if (rows == 34816 && k == 5120 &&
         (type == QType::Q4_G64_FP16 || type == QType::Q8_G32_FP16 ||
          type == QType::FP8_E4M3FN_ROW_BF16 || type == QType::NVFP4))

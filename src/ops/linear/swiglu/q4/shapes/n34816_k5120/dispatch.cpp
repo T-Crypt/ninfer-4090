@@ -30,7 +30,7 @@ constexpr std::array<Plan, 10> kPlans{{
 }};
 
 const Plan& select_plan(int rows, int k, int tokens) {
-    if (rows != 34816 || k != 5120 || tokens <= 0)
+    if ((rows != 34816 && rows != 28672) || k != 5120 || tokens <= 0)
         throw std::invalid_argument("q4 linear_swiglu: unsupported shape or token extent");
     for (const auto& plan : kPlans)
         if (tokens <= plan.last_tokens) return plan;
@@ -38,13 +38,13 @@ const Plan& select_plan(int rows, int k, int tokens) {
 }
 
 template <class Arena>
-Tensor allocate_projection(Arena& arena, int tokens) {
-    return arena.alloc(DType::BF16, {34816, tokens});
+Tensor allocate_projection(Arena& arena, int rows, int tokens) {
+    return arena.alloc(DType::BF16, {rows, tokens});
 }
 
-std::size_t materialized_bytes(int tokens) {
+std::size_t materialized_bytes(int rows, int tokens) {
     WorkspaceLayoutBuilder layout;
-    (void)allocate_projection(layout, tokens);
+    (void)allocate_projection(layout, rows, tokens);
     return layout.peak_bytes(1);
 }
 
@@ -64,7 +64,7 @@ std::size_t q4_linear_swiglu_capacity_workspace_bytes(int rows, int k, LinearPol
     int begin         = 1;
     for (const auto& plan : kPlans) {
         if (plan.materialized && plan.last_tokens >= first && begin <= last)
-            bytes = std::max(bytes, materialized_bytes(std::min(plan.last_tokens, last)));
+            bytes = std::max(bytes, materialized_bytes(rows, std::min(plan.last_tokens, last)));
         if (plan.last_tokens >= last) break;
         begin = plan.last_tokens + 1;
     }
@@ -81,7 +81,7 @@ void q4_linear_swiglu_dispatch(const Tensor& x, const Weight& w, Tensor& out, Li
     }
     if (!plan.materialized) return plan.launch(x, w, out, execution.stream());
     auto scope   = workspace.scope();
-    auto gate_up = allocate_projection(workspace, x.ne[1]);
+    auto gate_up = allocate_projection(workspace, w.n, x.ne[1]);
     plan.launch(x, w, gate_up, execution.stream());
     silu_mul(gate_up.slice(0, 0, out.ne[0]), gate_up.slice(0, out.ne[0], out.ne[0]), out,
              execution);

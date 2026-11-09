@@ -24,6 +24,11 @@ using DirectR1T1W4K17408 = Q5A16DirectSimtSchedule<1, 1, 4, 4, 10, 17408, true>;
 using DirectR1T2W2K17408 = Q5A16DirectSimtSchedule<1, 2, 2, 8, 16, 17408, true>;
 using DirectR1T3W2K17408 = Q5A16DirectSimtSchedule<1, 3, 2, 8, 16, 17408, true>;
 using DirectR1T4W2K17408 = Q5A16DirectSimtSchedule<1, 4, 2, 8, 16, 17408, true>;
+// Fork (prep/qwen4-27b-ops): Qwen4-27B FFN down, K=14336 (14 blocks of 1024).
+using DirectR1T1W4K14336 = Q5A16DirectSimtSchedule<1, 1, 4, 4, 10, 14336, true>;
+using DirectR1T2W2K14336 = Q5A16DirectSimtSchedule<1, 2, 2, 8, 16, 14336, true>;
+using DirectR1T3W2K14336 = Q5A16DirectSimtSchedule<1, 3, 2, 8, 16, 14336, true>;
+using DirectR1T4W2K14336 = Q5A16DirectSimtSchedule<1, 4, 2, 8, 16, 14336, true>;
 
 using DirectR2T4W2G8B4         = Q5A16DirectSimtSchedule<2, 4, 2, 8, 4>;
 using SlicedR16T8W4S2          = Q5A16SlicedKMmaSchedule<16, 8, 4, 2, Cache::cg, Cache::ca, 2>;

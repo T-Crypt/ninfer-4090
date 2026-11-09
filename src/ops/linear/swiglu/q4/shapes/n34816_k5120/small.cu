@@ -19,9 +19,10 @@
 namespace ninfer::ops::detail {
 namespace {
 
-constexpr int kN                 = 34816;
+// Fork (prep/qwen4-27b-ops): the gate/up height is a runtime value, so one kernel set serves
+// Qwen3.x [34816,5120] and Qwen4-27B [28672,5120] (intermediate 17408 / 14336).
 constexpr int kK                 = 5120;
-constexpr int kIntermediate      = kN / 2;
+[[nodiscard]] constexpr bool supported_rows(int n) { return n == 34816 || n == 28672; }
 constexpr int kGroupK            = 64;
 constexpr int kGroups            = kK / kGroupK;
 constexpr int kBytesPerGroup     = 32;
@@ -33,18 +34,19 @@ constexpr int kBlockThreads      = kWarpsPerBlock * 32;
 constexpr int kPairsPerBlock     = kWarpsPerBlock;
 constexpr int kXVecs             = kK / 8; // x as uint4 (8 bf16 each)
 constexpr int kTiles             = kGroups / kGroupsPerWarpTile;
-static_assert(kIntermediate % kPairsPerBlock == 0);
+static_assert(34816 / 2 % kPairsPerBlock == 0 && 28672 / 2 % kPairsPerBlock == 0);
 static_assert(kBytesPerGroup == 2 * kVecBytes);
 static_assert(kGroups % kGroupsPerWarpTile == 0);
 static_assert(kVecsPerWarpTile == 32);
 
 struct Q4SwiGluSmallTRows {
     static constexpr int kOutputRowsPerCta = 8;
+    int intermediate;
 
     __host__ __device__ int output_rows(int rows) const { return rows / 2; }
 
     __device__ __forceinline__ int weight_row(int output_row0, int local_row) const {
-        return output_row0 + (local_row & 7) + (local_row >= 8 ? kIntermediate : 0);
+        return output_row0 + (local_row & 7) + (local_row >= 8 ? intermediate : 0);
     }
 };
 
@@ -75,8 +77,8 @@ void launch_small_t_active(const Tensor& x, const Weight& w, Tensor& out, cudaSt
                                 kMinBlocks, kK, ActiveCols, Q4SlicedKReduction::Pairwise>;
     launch_q4_a16_sliced_k_mma<Schedule>(
         q4_linear_operands(x, w),
-        LinearBf16Output{static_cast<__nv_bfloat16*>(out.data), kIntermediate},
-        Q4SwiGluSmallTEpilogue{}, stream, Q4SwiGluSmallTRows{});
+        LinearBf16Output{static_cast<__nv_bfloat16*>(out.data), w.n / 2},
+        Q4SwiGluSmallTEpilogue{}, stream, Q4SwiGluSmallTRows{w.n / 2});
 }
 
 template <std::size_t... Offsets>
@@ -112,7 +114,8 @@ __device__ __forceinline__ void q4_issue_pair_tile(uint4 (*__restrict__ s_code)[
 __global__ void q4_linear_swiglu_gemv_pair_kernel(const __nv_bfloat16* __restrict__ x,
                                                   const std::uint8_t* __restrict__ codes,
                                                   const std::uint8_t* __restrict__ scales,
-                                                  __nv_bfloat16* __restrict__ out) {
+                                                  __nv_bfloat16* __restrict__ out,
+                                                  int intermediate) {
     constexpr int kStages   = 3;
     constexpr int kPrefetch = kStages - 1;
     __shared__ __align__(16) __nv_bfloat16 x_sh[kK];
@@ -134,9 +137,9 @@ __global__ void q4_linear_swiglu_gemv_pair_kernel(const __nv_bfloat16* __restric
         codes + static_cast<std::int64_t>(out_row) * kGroups * kBytesPerGroup;
     const std::uint8_t* gate_scale_row = scales + static_cast<std::int64_t>(out_row) * kGroups * 2;
     const std::uint8_t* up_code_row =
-        codes + static_cast<std::int64_t>(out_row + kIntermediate) * kGroups * kBytesPerGroup;
+        codes + static_cast<std::int64_t>(out_row + intermediate) * kGroups * kBytesPerGroup;
     const std::uint8_t* up_scale_row =
-        scales + static_cast<std::int64_t>(out_row + kIntermediate) * kGroups * 2;
+        scales + static_cast<std::int64_t>(out_row + intermediate) * kGroups * 2;
     const auto* x2 = reinterpret_cast<const __nv_bfloat162*>(x_sh);
 
     float gate_acc = 0.0f;
@@ -202,13 +205,13 @@ __global__ void q4_linear_swiglu_gemv_pair_kernel(const __nv_bfloat16* __restric
 
 void launch_q4_swiglu_gemv_pair(const Tensor& x, const Weight& w, Tensor& out,
                                 cudaStream_t stream) {
-    if (w.n != kN || w.k != kK || w.padded_shape[1] != kK) {
-        throw std::invalid_argument("q4 linear_swiglu GEMV requires weight [34816,5120]");
+    if (!supported_rows(w.n) || w.k != kK || w.padded_shape[1] != kK) {
+        throw std::invalid_argument("q4 linear_swiglu GEMV requires weight [34816|28672,5120]");
     }
-    const int grid = kIntermediate / kPairsPerBlock;
+    const int grid = w.n / 2 / kPairsPerBlock;
     q4_linear_swiglu_gemv_pair_kernel<<<grid, kBlockThreads, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
-        static_cast<const std::uint8_t*>(w.scales), static_cast<__nv_bfloat16*>(out.data));
+        static_cast<const std::uint8_t*>(w.scales), static_cast<__nv_bfloat16*>(out.data), w.n / 2);
     CUDA_CHECK(cudaGetLastError());
 }
 
