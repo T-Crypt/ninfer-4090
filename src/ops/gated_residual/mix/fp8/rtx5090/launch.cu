@@ -28,7 +28,13 @@ int up_token_tile(UpSchedule up) {
 }
 
 Plan plan(LinearPolicy down, LinearPolicy up, int m) {
+#if defined(NINFER_SM86)
+    // Fork (prep/qwen4-27b-ops): the A8 down schedules are TMA (sm_90+); sm_89 keeps A16 down.
+    (void)down;
+    return {false, allows_a8(up) && m >= 33,
+#else
     return {allows_a8(down), allows_a8(up) && m >= 33,
+#endif
             m <= 64    ? 32
             : m <= 320 ? 64
                        : 128,
