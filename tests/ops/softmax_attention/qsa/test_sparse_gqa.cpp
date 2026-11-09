@@ -250,7 +250,7 @@ int read_footprint(DeviceContext& device, KvCacheStorage storage, bool padded, i
 
 int graph_update(DeviceContext& device, int tokens, int batch,
                  KvCacheStorage storage = KvCacheStorage::BFloat16, bool padded = true,
-                 int query_heads = 24, int kv_heads = 0) {
+                 int query_heads = 24, int kv_heads = 0, unsigned fixed_envelope = 0) {
     Fixture f(tokens, batch, 8192, padded, storage, false, query_heads, kv_heads);
     const auto bytes = ops::qsa_sparse_gqa_workspace_capacity_bytes(
         storage, f.q_heads, f.kv_heads, tokens, tokens, batch, {262144},
@@ -262,7 +262,9 @@ int graph_update(DeviceContext& device, int tokens, int batch,
     int failures = 0;
     for (int history : {64, 2051, 8192, 64, 0}) {
         f.history                     = std::max(1, history);
-        f.envelope.max_visible_tokens = history;
+        // Fork: a nonzero fixed_envelope keeps the capture envelope (as serving does) and moves
+        // only the history, so the plan may legitimately depend on the envelope.
+        f.envelope.max_visible_tokens = fixed_envelope ? fixed_envelope : history;
         f.reset(history ? 0 : 2);
         DecodeGraphDefinition definition;
         definition.capture(device.stream(), [&] { f.launch(workspace, device.execution_view()); });
@@ -620,8 +622,8 @@ void add_four_head_cases(OpSuite& suite, KvCacheStorage storage) {
     special(
         "metadata_update",
         [=] {
-            return graph_update(cuda_environment().context, 33, 8, storage, true, 24, 4) +
-                   graph_update(cuda_environment().context, 8, 8, storage, true, 24, 4);
+            return graph_update(cuda_environment().context, 33, 8, storage, true, 24, 4, 262144) +
+                   graph_update(cuda_environment().context, 8, 8, storage, true, 24, 4, 262144);
         },
         "graph");
     special("gate_rounding", [=] {
