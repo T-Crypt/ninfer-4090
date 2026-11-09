@@ -3,6 +3,8 @@
 #include "ninfer/types.h"
 #include "ops/kv_cache/kernels/fp8.cuh"
 #include "ops/kv_cache/kernels/hadamard.cuh"
+#include "ops/kv_cache/kernels/e8_lattice.cuh"
+#include "ops/kv_cache/kernels/fork_codec.cuh"
 #include "ops/common/quant/integer.cuh"
 #include "ops/common/quant/nvfp4.cuh"
 #include "ops/softmax_attention/qsa/prepare/norm_rope.cuh"
@@ -131,12 +133,55 @@ __device__ __forceinline__ void store_int8_contiguous(const float (&values)[8], 
     if (lane % 8 == 0) reinterpret_cast<__half*>(scales)[lane / 8] = quant.scale;
 }
 
-template <KvCacheStorage Storage>
+// Fork (prep/qwen4-27b-ops): rk4v4-e8 in QSA. Lane l holds features [8l, 8l+8), so eight lanes
+// form one G64 group (FP16 scale = absmax/7, the fork writer's rule) and each lane's eight features
+// are one E8 block. Keys project onto E8 before rounding to [-8,7]; values round to [-7,7]. Two
+// signed 4-bit codes per byte, feature 2i in the low nibble. The decode is code * scale for both.
+template <bool E8>
+__device__ __forceinline__ void store_int4_contiguous(const float (&values)[8], std::uint8_t* codes,
+                                                      std::uint8_t* scales, int lane) {
+    float maximum = 0;
+#pragma unroll
+    for (float x : values) maximum = fmaxf(maximum, fabsf(x));
+    maximum            = common::warp_max<8>(maximum);
+    const __half scale = __float2half_rn(maximum > 0.0f ? maximum / 7.0f : 0.0f);
+    const float s      = __half2float(scale);
+    const float inv    = s > 0.0f ? 1.0f / s : 0.0f;
+    std::int8_t q[8];
+    if constexpr (E8) {
+        float scaled[8], lattice[8];
+#pragma unroll
+        for (int j = 0; j < 8; ++j) scaled[j] = values[j] * inv;
+        e8_project_8d_fast(scaled, lattice);
+        // Same half-coset collapse as the fork's rk4v4-e8 writer: no coset bit is stored.
+#pragma unroll
+        for (int j = 0; j < 8; ++j)
+            q[j] = static_cast<std::int8_t>(max(-8, min(7, static_cast<int>(rintf(lattice[j])))));
+    } else {
+#pragma unroll
+        for (int j = 0; j < 8; ++j) q[j] = kv_cache_i4_quant_code(values[j], inv);
+    }
+    unsigned word = 0;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) word |= unsigned(kv_cache_pack_i4(q[2 * i], q[2 * i + 1])) << (8 * i);
+    auto* output = codes + 4 * lane;
+    if (reinterpret_cast<std::uintptr_t>(output) % 4 == 0)
+        *reinterpret_cast<unsigned*>(output) = word;
+    else {
+#pragma unroll
+        for (int i = 0; i < 4; ++i) output[i] = std::uint8_t(word >> (8 * i));
+    }
+    if (lane % 8 == 0) reinterpret_cast<__half*>(scales)[lane / 8] = scale;
+}
+
+template <KvCacheStorage Storage, bool Key = true>
 __device__ __forceinline__ void store_quantized_contiguous(const float (&values)[8],
                                                            std::uint8_t* codes,
                                                            std::uint8_t* scales, int lane) {
     if constexpr (Storage == KvCacheStorage::Int8Group64)
         store_int8_contiguous(values, codes, scales, lane);
+    else if constexpr (Storage == KvCacheStorage::RK4V4E8)
+        store_int4_contiguous<Key>(values, codes, scales, lane);
     else {
         static_assert(Storage != Storage, "four-head FP8 targets the retired Row256 layout");
     }
@@ -194,8 +239,8 @@ __device__ __forceinline__ void prepare_kv_vector(const PrepareArguments& a, int
     if constexpr (Storage == KvCacheStorage::BFloat16)
         store_16bit_contiguous<true>(x, a.values.at(p % 64, head, page), lane);
     else
-        store_quantized_contiguous<Storage>(x, a.values.at(p % 64, head, page),
-                                            a.value_scales.at(p % 64, head, page), lane);
+        store_quantized_contiguous<Storage, false>(x, a.values.at(p % 64, head, page),
+                                                   a.value_scales.at(p % 64, head, page), lane);
 }
 
 } // namespace ninfer::ops::detail::qsa

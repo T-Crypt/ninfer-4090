@@ -99,14 +99,15 @@ void launch_sparse_gqa_instance(SparseGqaArguments a, KvCacheStorage storage, in
             else
                 launch<Storage, false, KvHeads>(a, plan, launch_plan, queries, execution);
         };
-        if (kv_heads == 1)
-            geometry.template operator()<1>();
-        else if (kv_heads == 4) {
+        if (kv_heads == 1) {
+            if constexpr (Storage != KvCacheStorage::RK4V4E8) geometry.template operator()<1>();
+        } else if (kv_heads == 4) {
             if constexpr (false /* four-head FP8: retired Row256 */ ||
                           Storage == KvCacheStorage::BFloat16 ||
-                          Storage == KvCacheStorage::Int8Group64)
+                          Storage == KvCacheStorage::Int8Group64 ||
+                          Storage == KvCacheStorage::RK4V4E8)
                 geometry.template operator()<4>();
-        } else
+        } else if constexpr (Storage != KvCacheStorage::RK4V4E8)
             geometry.template operator()<2>();
     };
     switch (storage) {
@@ -124,6 +125,9 @@ void launch_sparse_gqa_instance(SparseGqaArguments a, KvCacheStorage storage, in
         break;
     case KvCacheStorage::Fp8KeyNvfp4Value:
         dispatch.template operator()<KvCacheStorage::Fp8KeyNvfp4Value>();
+        break;
+    case KvCacheStorage::RK4V4E8:
+        dispatch.template operator()<KvCacheStorage::RK4V4E8>();
         break;
     default:
         break; // Validated by the public wrapper.

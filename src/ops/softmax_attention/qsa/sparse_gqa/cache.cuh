@@ -44,6 +44,13 @@ __device__ __forceinline__ float sparse_gqa_decode(const std::uint8_t* data,
     } else if constexpr (format == KvCacheVectorFormat::Int8Group64F16) {
         return float(reinterpret_cast<const std::int8_t*>(data)[d]) *
                __half2float(reinterpret_cast<const __half*>(scales)[d / 64]);
+    } else if constexpr (format == KvCacheVectorFormat::Int4Group64F16 ||
+                         format == KvCacheVectorFormat::E8LatticeGroup64F16) {
+        // Fork (prep/qwen4-27b-ops): rk4v4-e8 planes, signed 4-bit codes, feature 2i low nibble.
+        const unsigned byte  = data[d / 2];
+        const unsigned code  = d % 2 ? byte >> 4 : byte & 0x0fu;
+        const int value      = int(code ^ 8u) - 8;
+        return float(value) * __half2float(reinterpret_cast<const __half*>(scales)[d / 64]);
     } else if constexpr (format == KvCacheVectorFormat::Fp8E4m3fnGroup128Ue8m0) {
         __nv_fp8_e4m3 code;
         code.__x = data[d];
@@ -79,6 +86,25 @@ __device__ __forceinline__ int4 sparse_gqa_expand(const std::uint8_t* data,
         return common::nvfp4_dequant_f16x8(data + d / 2, scales[d / 16]);
     } else if constexpr (format == KvCacheVectorFormat::Fp8E4m3fnGroup128Ue8m0 && Vector) {
         return common::fp8_dequant_f16x8(data + d, scales[d / 128]);
+    } else if constexpr ((format == KvCacheVectorFormat::Int4Group64F16 ||
+                          format == KvCacheVectorFormat::E8LatticeGroup64F16) &&
+                         Vector) {
+        // Eight features from four bytes. Offset-binary nibbles become exact halves
+        // 1024 + (code + 8); subtracting 1032 recovers the signed code, then one scale multiply.
+        const unsigned packed = *reinterpret_cast<const unsigned*>(data + d / 2) ^ 0x88888888u;
+        const auto scale      = reinterpret_cast<const __half*>(scales)[d / 64];
+        const unsigned bias   = 0x64086408u;
+        unsigned out[4];
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            const unsigned byte = (packed >> (8 * i)) & 0xffu;
+            const unsigned bits = 0x64006400u | (byte & 0x0fu) | ((byte >> 4) << 16);
+            const auto codes    = __hsub2(*reinterpret_cast<const __half2*>(&bits),
+                                          *reinterpret_cast<const __half2*>(&bias));
+            const auto value    = __hmul2(codes, __halves2half2(scale, scale));
+            out[i]              = *reinterpret_cast<const unsigned*>(&value);
+        }
+        return make_int4(out[0], out[1], out[2], out[3]);
     } else if constexpr (format == KvCacheVectorFormat::Int8Group64F16 && Vector) {
         const auto packed = common::load_vec<int2>(data + d);
         const auto scale  = reinterpret_cast<const __half*>(scales)[d / 64];

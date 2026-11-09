@@ -140,6 +140,13 @@ void dispatch_geometry(const PrepareArguments& args, PreparePlan plan, cudaStrea
 
 template <KvCacheStorage Storage, bool Queries>
 void dispatch(const PrepareArguments& args, PreparePlan plan, cudaStream_t stream) {
+    // Fork (prep/qwen4-27b-ops): rk4v4-e8 has only the four-head contiguous encoder.
+    if constexpr (Storage == KvCacheStorage::RK4V4E8) {
+        if (args.kv_heads != 4)
+            throw std::invalid_argument("qsa_prepare: rk4v4-e8 requires four KV heads");
+        dispatch_geometry<Storage, 4, Queries>(args, plan, stream);
+        return;
+    }
     if (args.kv_heads == 1) dispatch_geometry<Storage, 1, Queries>(args, plan, stream);
 
 #if NINFER_TARGET_RTX5090
@@ -171,6 +178,9 @@ void launch(const PrepareArguments& args, PreparePlan plan, KvCacheStorage stora
         break;
     case KvCacheStorage::Fp8KeyNvfp4Value:
         dispatch<KvCacheStorage::Fp8KeyNvfp4Value, Queries>(args, plan, execution.stream());
+        break;
+    case KvCacheStorage::RK4V4E8:
+        dispatch<KvCacheStorage::RK4V4E8, Queries>(args, plan, execution.stream());
         break;
     default:
         throw std::invalid_argument("qsa_prepare: unsupported KV storage");

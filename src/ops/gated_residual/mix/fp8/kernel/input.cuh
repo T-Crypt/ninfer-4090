@@ -11,6 +11,11 @@ __global__ __launch_bounds__(256) void encode_injection(const __nv_bfloat16* inp
                                                         const __nv_bfloat16* weight,
                                                         std::uint8_t* codes, float* scales,
                                                         float* injection) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 900
+    // Fork (prep/qwen4-27b-ops): A8 down input only; sm_89 plans A16 (the injection kernel), and
+    // this body exceeds the 48 KB static shared cap at device link.
+    __trap();
+#else
     constexpr int Pairs = kTotal / 2, Slots = Pairs / 256;
     const auto m  = std::int64_t(blockIdx.x);
     const int tid = threadIdx.x;
@@ -49,6 +54,7 @@ __global__ __launch_bounds__(256) void encode_injection(const __nv_bfloat16* inp
             __nv_cvt_float2_to_fp8x2(make_float2(x.x * inv, x.y * inv), __NV_SATFINITE, __NV_E4M3);
     }
     if (tid == 0) scales[m] = scale;
+#endif
 }
 
 // Materialize complete MMA token tiles in private codes/scales. Padding does

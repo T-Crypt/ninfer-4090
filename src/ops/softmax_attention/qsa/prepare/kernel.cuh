@@ -88,7 +88,8 @@ __global__ __launch_bounds__(128) void prepare_kernel(const __grid_constant__ Pr
     if (live && task < Geometry::raw_task) {
         if constexpr ((false /* four-head FP8: retired Row256 */ ||
                        Storage == KvCacheStorage::BFloat16 ||
-                       Storage == KvCacheStorage::Int8Group64) &&
+                       Storage == KvCacheStorage::Int8Group64 ||
+                       Storage == KvCacheStorage::RK4V4E8) &&
                       KvHeads == 4) {
             prepare_kv_vector<Storage, KvHeads>(a, task - Geometry::key_task, t, b, lane,
                                                 coefficients);

@@ -16,7 +16,7 @@ void profile(KvCacheStorage storage, int query_heads, int kv_heads, int lo, int 
     v.require(
         storage == KvCacheStorage::BFloat16 || storage == KvCacheStorage::Fp8E4m3fnGroup128Ue8m0 ||
             storage == KvCacheStorage::Int8Group64 || storage == KvCacheStorage::Nvfp4Group16 ||
-            storage == KvCacheStorage::Fp8KeyNvfp4Value,
+            storage == KvCacheStorage::Fp8KeyNvfp4Value || storage == KvCacheStorage::RK4V4E8,
         "cache storage");
     v.require(lo > 0 && hi >= lo && batch >= 1 && batch <= 8, "T/B interval");
     v.require(multiprocessor_count > 0, "SM count");
