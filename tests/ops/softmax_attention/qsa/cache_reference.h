@@ -16,7 +16,7 @@
 
 namespace ninfer::test::qsa::prepare {
 
-enum class Encoding { Bf16, Fp16, Int8, Fp8, Nvfp4 };
+enum class Encoding { Bf16, Fp16, Int8, Fp8, Nvfp4, Int4 };
 
 struct VectorEncoding {
     Encoding encoding;
@@ -51,6 +51,16 @@ inline CacheEncoding cache_encoding(KvCacheStorage storage) {
         return {nvfp4, nvfp4};
     case KvCacheStorage::Fp8KeyNvfp4Value:
         return {fp8, nvfp4};
+    case KvCacheStorage::RK4V4E8: {
+        // Fork: the stored form is signed INT4 x FP16 G64 for both planes. Nearest rounding is a
+        // valid E8-plane payload; the E8 encoder is checked separately.
+        const VectorEncoding key{Encoding::Int4, DType::U8, DType::FP16, 128, 4, 64, true};
+        auto value   = key;
+        value.rotate = false;
+        return {key, value};
+    }
+    default:
+        break;
     }
     throw std::invalid_argument("test cache storage");
 }
@@ -105,6 +115,7 @@ inline std::uint8_t encode_minifloat(float x, bool fp4) {
 
 inline double decode_code(std::uint8_t code, Encoding encoding) {
     if (encoding == Encoding::Int8) return std::bit_cast<std::int8_t>(code);
+    if (encoding == Encoding::Int4) return int((code & 15) ^ 8) - 8;
     if (encoding == Encoding::Nvfp4) return (code & 8 ? -1 : 1) * positive_fp4(code);
     return (code & 128 ? -1 : 1) * positive_fp8(code & 127);
 }
@@ -134,6 +145,10 @@ inline ReferenceScale encode_scale(float absmax, Encoding encoding) {
         return {bits, float(fp8_cache_multiplier(bits))};
     }
     if (absmax == 0) return {0, 0};
+    if (encoding == Encoding::Int4) {
+        const auto bits = fp16_encode(absmax / 7.0F);
+        return {bits, fp16_decode(bits)};
+    }
     if (encoding == Encoding::Nvfp4) {
         const float bounded = std::clamp(absmax / 6.0F, 0x1p-9F, 448.0F);
         const auto bits     = encode_minifloat(bounded, false);
@@ -147,12 +162,14 @@ inline ReferenceScale encode_scale(float absmax, Encoding encoding) {
 inline std::uint8_t encode_code(float x, float scale, Encoding encoding) {
     if (scale == 0) return 0;
     const float normalized = encoding == Encoding::Nvfp4 ? x / scale : x * (1.0F / scale);
-    if (encoding != Encoding::Int8)
+    if (encoding != Encoding::Int8 && encoding != Encoding::Int4)
         return encode_minifloat(normalized, encoding == Encoding::Nvfp4);
-    const float clamped   = std::clamp(normalized, -127.0F, 127.0F);
+    const float limit     = encoding == Encoding::Int4 ? 7.0F : 127.0F;
+    const float clamped   = std::clamp(normalized, -limit, limit);
     const int lower       = int(std::floor(clamped));
     const float remainder = clamped - lower;
     const int rounded     = lower + (remainder > 0.5F || (remainder == 0.5F && (lower & 1)));
+    if (encoding == Encoding::Int4) return std::uint8_t(rounded & 15);
     return std::bit_cast<std::uint8_t>(std::int8_t(rounded));
 }
 
@@ -176,7 +193,7 @@ inline EncodedRow encode_row(std::array<float, 256> values, VectorEncoding forma
             write_u16(out.scales, 2 * group, scale.bits);
         for (int d = begin; d < begin + format.group; ++d) {
             const auto code = encode_code(values[d], scale.value, format.encoding);
-            if (format.encoding == Encoding::Nvfp4)
+            if (format.encoding == Encoding::Nvfp4 || format.encoding == Encoding::Int4)
                 out.data[d / 2] |= code << (4 * (d % 2));
             else
                 out.data[d] = code;
